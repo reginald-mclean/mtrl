@@ -46,6 +46,8 @@ class Algorithm(
     """Based on https://github.com/kevinzakka/nanorl/blob/main/nanorl/agent.py"""
 
     num_tasks: int = struct.field(pytree_node=False)
+    #sparse_rewards: bool = False
+    #sparse_magnitude: float = 0.0
 
     @staticmethod
     @abc.abstractmethod
@@ -188,7 +190,7 @@ class OffPolicyAlgorithm(
                 self, logs = self.update(data)
 
                 # Logging
-                if global_step % 100 == 0:
+                if global_step % 500 == 0:
                     sps_steps = (global_step - start_step) * envs.num_envs
                     sps = int(sps_steps / (time.time() - start_time))
                     print("SPS:", sps)
@@ -315,6 +317,8 @@ class OnPolicyAlgorithm(
         for global_step in range(start_step, config.total_steps // envs.num_envs):
             total_steps = global_step * envs.num_envs
 
+            
+
             self, actions, log_probs, means, stds, values = (
                 self.sample_action_dist_and_value(obs)
             )
@@ -334,6 +338,7 @@ class OnPolicyAlgorithm(
             has_autoreset = np.logical_or(terminations, truncations)
             for i, env_ended in enumerate(has_autoreset):
                 if env_ended:
+                    print(envs.get_attr('sparse_rewards'))
                     global_episodic_return.append(infos["episode"]["r"][i])
                     global_episodic_length.append(infos["episode"]["l"][i])
                     episodes_ended += 1

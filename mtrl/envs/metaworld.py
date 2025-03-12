@@ -20,6 +20,8 @@ class MetaworldConfig(EnvConfig):
     num_goals: int = 50
     reward_normalization_method: str | None = None
     task_name: str | None = None
+    sparse_rewards: bool = False
+    sparse_magnitude: int = 0
 
     @cached_property
     @override
@@ -148,6 +150,8 @@ class MetaworldConfig(EnvConfig):
                 reward_function_version=self.reward_func_version,
                 num_goals=self.num_goals,
                 reward_normalization_method=self.reward_normalization_method,
+                sparse_rewards=self.sparse_rewards,
+                sparse_magnitude=self.sparse_magnitude,
             )
         elif self.env_id == "MT1":
             assert self.task_name is not None, "task_name must be specified for MT1"
@@ -158,6 +162,8 @@ class MetaworldConfig(EnvConfig):
                         env_name=self.task_name,
                         use_one_hot=False,
                         seed=seed,
+                        sparse_rewards=self.sparse_rewards,
+                        sparse_magnitude=self.sparse_magnitude,
                         terminate_on_success=self.terminate_on_success,
                         reward_function_version=self.reward_func_version,
                         num_goals=self.num_goals,
@@ -170,6 +176,8 @@ class MetaworldConfig(EnvConfig):
                 f"Meta-World/{self.env_id}",
                 seed=seed,
                 use_one_hot=self.use_one_hot,
+                sparse_rewards=self.sparse_rewards,
+                sparse_magnitude=self.sparse_magnitude,
                 terminate_on_success=self.terminate_on_success,
                 vector_strategy="async",
                 reward_function_version=self.reward_func_version,
