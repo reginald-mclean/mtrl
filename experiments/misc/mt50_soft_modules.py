@@ -4,7 +4,7 @@ from pathlib import Path
 import tyro
 
 from mtrl.config.networks import ContinuousActionPolicyConfig, QValueFunctionConfig
-from mtrl.config.nn import MultiHeadConfig
+from mtrl.config.nn import SoftModulesConfig
 from mtrl.config.optim import OptimizerConfig
 from mtrl.config.rl import OffPolicyTrainingConfig
 from mtrl.envs import MetaworldConfig
@@ -26,33 +26,40 @@ def main() -> None:
     args = tyro.cli(Args)
 
     experiment = Experiment(
-        exp_name="mt10_mtmhsac",
+        exp_name="mt50_softmodules_depth_4",
         seed=args.seed,
         data_dir=args.data_dir,
         env=MetaworldConfig(
-            env_id="MT10",
+            env_id="MT50",
             terminate_on_success=False,
         ),
         algorithm=MTSACConfig(
-            num_tasks=10,
+            num_tasks=50,
             gamma=0.99,
             actor_config=ContinuousActionPolicyConfig(
-                network_config=MultiHeadConfig(
-                    num_tasks=10, optimizer=OptimizerConfig(max_grad_norm=1.0)
+                network_config=SoftModulesConfig(
+                    num_tasks=50,
+                    depth=4,
+                    num_modules=4,
+                    optimizer=OptimizerConfig(max_grad_norm=1.0)
                 )
             ),
             critic_config=QValueFunctionConfig(
-                network_config=MultiHeadConfig(
-                    num_tasks=10,
+                network_config=SoftModulesConfig(
+                    num_tasks=50,
+                    depth=4,
+                    num_modules=4,
                     optimizer=OptimizerConfig(max_grad_norm=1.0),
                 )
             ),
             num_critics=2,
+            use_task_weights=False,
         ),
         training_config=OffPolicyTrainingConfig(
-            total_steps=int(2e7),
-            buffer_size=int(1e6),
-            batch_size=1280,
+            total_steps=int(1e8),
+            buffer_size=int(100_000*50),
+            batch_size=6400,
+            evaluation_frequency=int(1_000_000 // 500)
         ),
         checkpoint=True,
         resume=args.resume,

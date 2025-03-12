@@ -28,7 +28,7 @@ def main() -> None:
     num_tasks = 50
 
     experiment = Experiment(
-        exp_name="mt50_mtmhsac_v2",
+        exp_name="mtmhsac_moore_params_log_std-10_clipped_q",
         seed=args.seed,
         data_dir=args.data_dir,
         env=MetaworldConfig(
@@ -41,12 +41,15 @@ def main() -> None:
             gamma=0.99,
             actor_config=ContinuousActionPolicyConfig(
                 network_config=MultiHeadConfig(
-                    num_tasks=num_tasks, optimizer=OptimizerConfig(max_grad_norm=1.0)
-                )
+                    num_tasks=num_tasks,
+                    width=925,
+                    optimizer=OptimizerConfig(max_grad_norm=1.0)
+                ),
             ),
             critic_config=QValueFunctionConfig(
                 network_config=MultiHeadConfig(
                     num_tasks=num_tasks,
+                    width=925,
                     optimizer=OptimizerConfig(max_grad_norm=1.0),
                 )
             ),
