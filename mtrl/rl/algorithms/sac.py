@@ -185,6 +185,22 @@ class SAC(OffPolicyAlgorithm[SACConfig]):
         }
 
     @override
+    def on_task_change(self, task_idx: int) -> None:
+        pass
+
+    @override
+    def should_early_terminate(self) -> bool:
+        return False
+
+    @override
+    def on_task_start(self, current_task_idx: int) -> None:
+        pass
+
+    @override
+    def _handle_task_change(self, seed) -> None:
+        pass
+
+    @override
     def sample_action(self, observation: Observation) -> tuple[Self, Action]:
         action, key = _sample_action(self.actor, observation, self.key)
         return self.replace(key=key), jax.device_get(action)

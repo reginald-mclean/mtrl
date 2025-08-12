@@ -30,6 +30,7 @@ class NeuralNetworkConfig:
     optimizer: OptimizerConfig = OptimizerConfig()
     """The optimizer to use for the network."""
 
+
 @dataclass(frozen=True, kw_only=True)
 class VanillaNetworkConfig(NeuralNetworkConfig):
     use_skip_connections: bool = False

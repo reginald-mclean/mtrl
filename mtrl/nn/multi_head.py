@@ -59,7 +59,9 @@ class MultiHeadNetwork(nn.Module):
             kernel_init=self.head_kernel_init,
             bias_init=self.head_bias_init,
             use_bias=self.config.use_bias,
-        )(x)
+        )(
+            x
+        )
 
         # 3) Collect the output from the appropriate head for each input
         task_indices = task_idx.argmax(axis=-1)

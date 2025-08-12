@@ -119,4 +119,6 @@ def gradnorm(
 
         return weighted_updates, new_state
 
-    return optax.GradientTransformationExtraArgs(init_fn, update_fn)  # pyright: ignore [reportArgumentType]
+    return optax.GradientTransformationExtraArgs(
+        init_fn, update_fn
+    )  # pyright: ignore [reportArgumentType]

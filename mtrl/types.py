@@ -1,10 +1,8 @@
-from typing import NamedTuple, TypedDict, Any, Protocol
+from typing import Any, NamedTuple, Protocol, TypedDict
 
 import numpy as np
 import numpy.typing as npt
-
-from jaxtyping import Float, Array
-
+from jaxtyping import Array, Float
 
 Action = Float[np.ndarray, "... action_dim"]
 Value = Float[np.ndarray, "... 1"]

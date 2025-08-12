@@ -66,7 +66,9 @@ class MOORENetwork(nn.Module):
             self.config.bias_init(),
             self.config.use_bias,
             activate_last=False,
-        )(x)
+        )(
+            x
+        )
         experts_out = orthogonal_1d(experts_out, num_experts=self.config.num_experts)
         features_out = jnp.einsum("bnk,bn->bk", experts_out, task_embedding)
         features_out = jax.nn.tanh(features_out)
@@ -85,7 +87,9 @@ class MOORENetwork(nn.Module):
             kernel_init=self.head_kernel_init,
             bias_init=self.head_bias_init,
             use_bias=self.config.use_bias,
-        )(features_out)
+        )(
+            features_out
+        )
 
         task_indices = task_idx.argmax(axis=-1)
         x = x[jnp.arange(batch_dim), task_indices]

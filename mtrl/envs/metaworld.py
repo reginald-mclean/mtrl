@@ -6,11 +6,11 @@ from typing import override
 
 import gymnasium as gym
 import numpy as np
+from metaworld.evaluation import evaluation
 
 from mtrl.types import Agent
 
 from .base import EnvConfig
-from metaworld.evaluation import evaluation
 
 
 @dataclass(frozen=True)
@@ -20,6 +20,9 @@ class MetaworldConfig(EnvConfig):
     num_goals: int = 50
     reward_normalization_method: str | None = None
     task_name: str | None = None
+    eval_envs: gym.vector.AsyncVectorEnv | gym.vector.SyncVectorEnv | None = None
+    steps_per_env: int | None = None
+
 
     @cached_property
     @override
@@ -82,12 +85,14 @@ class MetaworldConfig(EnvConfig):
 
         if self.use_one_hot and self.env_id != "MT1":
             num_tasks = 1
-            if self.env_id == "MT10":
+            if self.env_id == "MT10" or self.env_id == 'CW10':
                 num_tasks = 10
             if self.env_id == "MT50":
                 num_tasks = 50
             if self.env_id == "MT25":
                 num_tasks = 25
+            if self.env_id == 'CW20':
+                num_tasks = 20
             one_hot_ub = np.ones(num_tasks)
             one_hot_lb = np.zeros(num_tasks)
 
@@ -151,7 +156,7 @@ class MetaworldConfig(EnvConfig):
             )
         elif self.env_id == "MT1":
             assert self.task_name is not None, "task_name must be specified for MT1"
-            return gym.vector.SyncVectorEnv(
+            return gym.vector.AsyncVectorEnv(
                 [
                     lambda: gym.make(
                         "Meta-World/MT1",
@@ -165,7 +170,7 @@ class MetaworldConfig(EnvConfig):
                     )
                 ]
             )
-        else:
+        elif self.env_id == "MT10" or self.env_id == "MT50":
             return gym.make_vec(
                 f"Meta-World/{self.env_id}",
                 seed=seed,
@@ -175,4 +180,22 @@ class MetaworldConfig(EnvConfig):
                 reward_function_version=self.reward_func_version,
                 num_goals=self.num_goals,
                 reward_normalization_method=self.reward_normalization_method,
+                **kwargs,
+            )
+        elif self.env_id == "CW10" or self.env_id == "CW20":
+            return gym.make(
+                f"Meta-World/{self.env_id}",
+                seed=seed,
+                reward_function_version=self.reward_func_version,
+                reward_normalization_method=self.reward_normalization_method,
+                steps_per_env=self.steps_per_env,
+            ), gym.make_vec(
+                f"Meta-World/{self.env_id}_eval",
+                seed=seed,
+                use_one_hot=self.use_one_hot,
+                terminate_on_success=self.terminate_on_success,
+                vector_strategy="async",
+                reward_function_version=self.reward_func_version,
+                reward_normalization_method=self.reward_normalization_method,
+                exp_name=self.exp_name,
             )

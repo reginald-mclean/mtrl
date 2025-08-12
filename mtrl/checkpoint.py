@@ -1,19 +1,18 @@
 # pyright: reportCallIssue=false, reportAttributeAccessIssue=false
 import random
-from typing import TypedDict, NotRequired, TYPE_CHECKING
-import gymnasium as gym
+from typing import TYPE_CHECKING, NotRequired, TypedDict
 
+import gymnasium as gym
 import numpy as np
 import orbax.checkpoint as ocp
-
 
 from mtrl.rl.buffers import MultiTaskReplayBuffer
 from mtrl.types import (
     CheckpointMetadata,
     EnvCheckpoint,
     LogDict,
-    RNGCheckpoint,
     ReplayBufferCheckpoint,
+    RNGCheckpoint,
 )
 
 if TYPE_CHECKING:

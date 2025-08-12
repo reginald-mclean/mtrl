@@ -76,7 +76,14 @@ def _sample_action_dist_and_value(
     dist = policy.apply_fn(policy.params, observation)
     action, action_log_prob = dist.sample_and_log_prob(seed=action_key)
     value = value_function.apply_fn(value_function.params, observation)
-    return action, action_log_prob, dist.mode(), dist.stddev(), value, key  # pyright: ignore[reportReturnType]
+    return (
+        action,
+        action_log_prob,
+        dist.mode(),
+        dist.stddev(),
+        value,
+        key,
+    )  # pyright: ignore[reportReturnType]
 
 
 @dataclass(frozen=True)
@@ -108,12 +115,12 @@ class MTPPO(OnPolicyAlgorithm[MTPPOConfig]):
     def initialize(
         config: MTPPOConfig, env_config: EnvConfig, seed: int = 1
     ) -> "MTPPO":
-        assert isinstance(env_config.action_space, gym.spaces.Box), (
-            "Non-box spaces currently not supported."
-        )
-        assert isinstance(env_config.observation_space, gym.spaces.Box), (
-            "Non-box spaces currently not supported."
-        )
+        assert isinstance(
+            env_config.action_space, gym.spaces.Box
+        ), "Non-box spaces currently not supported."
+        assert isinstance(
+            env_config.observation_space, gym.spaces.Box
+        ), "Non-box spaces currently not supported."
 
         master_key = jax.random.PRNGKey(seed)
         algorithm_key, actor_init_key, vf_init_key = jax.random.split(master_key, 3)
@@ -203,7 +210,9 @@ class MTPPO(OnPolicyAlgorithm[MTPPOConfig]):
             new_log_probs: Float[Array, " batch_size"]
 
             action_dist = self.policy.apply_fn(params, _data.observations)
-            _, new_log_probs = action_dist.sample_and_log_prob(seed=policy_loss_key)  # pyright: ignore[reportAssignmentType]
+            _, new_log_probs = action_dist.sample_and_log_prob(
+                seed=policy_loss_key
+            )  # pyright: ignore[reportAssignmentType]
             log_ratio = new_log_probs.reshape(-1, 1) - _data.log_probs
             ratio = jnp.exp(log_ratio)
 
@@ -217,8 +226,11 @@ class MTPPO(OnPolicyAlgorithm[MTPPOConfig]):
             )
 
             if self.normalize_advantages:
-                advantages = (_data.advantages - jnp.mean(_data.advantages)) / (  # pyright: ignore[reportArgumentType]
-                    jnp.std(_data.advantages) + 1e-8  # pyright: ignore[reportArgumentType]
+                advantages = (
+                    _data.advantages - jnp.mean(_data.advantages)
+                ) / (  # pyright: ignore[reportArgumentType]
+                    jnp.std(_data.advantages)
+                    + 1e-8  # pyright: ignore[reportArgumentType]
                 )
             else:
                 advantages = _data.advantages
@@ -264,7 +276,9 @@ class MTPPO(OnPolicyAlgorithm[MTPPOConfig]):
                 v_clipped = data.values + jnp.clip(
                     new_values - data.values, -self.clip_eps, self.clip_eps
                 )
-                vf_loss_clipped = (v_clipped - data.returns) ** 2  # pyright: ignore[reportOperatorIssue]
+                vf_loss_clipped = (
+                    v_clipped - data.returns
+                ) ** 2  # pyright: ignore[reportOperatorIssue]
                 vf_loss = 0.5 * jnp.maximum(vf_loss_unclipped, vf_loss_clipped).mean()
             else:
                 vf_loss = 0.5 * ((new_values - data.returns) ** 2).mean()
@@ -318,12 +332,12 @@ class MTPPO(OnPolicyAlgorithm[MTPPOConfig]):
 
     @override
     def update(self, data: ReplayBufferSamples | Rollout) -> tuple[Self, LogDict]:
-        assert isinstance(data, Rollout), (
-            "MTPPO does not support replay buffer samples."
-        )
-        assert data.log_probs is not None, (
-            "Rollout policy log probs must have been recorded."
-        )
+        assert isinstance(
+            data, Rollout
+        ), "MTPPO does not support replay buffer samples."
+        assert (
+            data.log_probs is not None
+        ), "Rollout policy log probs must have been recorded."
         assert data.advantages is not None, "GAE must be enabled for MTPPO."
         assert data.returns is not None, "Returns must be computed for MTPPO."
         return self._update_inner(data)

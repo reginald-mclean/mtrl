@@ -15,18 +15,29 @@ class EnvConfig(abc.ABC):
     evaluation_num_episodes: int = 50
     terminate_on_success: bool = False
 
-    @cached_property
-    @abc.abstractmethod
-    def action_space(self) -> gym.Space: ...
+    exp_name: str = ''
+
+    reset_buffer_on_task_change: bool = True
+    reset_critic_on_task_change: bool = True
+    reset_optimizer_on_task_change: bool = True
+
 
     @cached_property
     @abc.abstractmethod
-    def observation_space(self) -> gym.Space: ...
+    def action_space(self) -> gym.Space:
+        ...
+
+    @cached_property
+    @abc.abstractmethod
+    def observation_space(self) -> gym.Space:
+        ...
 
     @abc.abstractmethod
-    def spawn(self, seed: int = 1) -> gym.vector.VectorEnv: ...
+    def spawn(self, seed: int = 1) -> gym.vector.VectorEnv:
+        ...
 
     @abc.abstractmethod
     def evaluate(
         self, envs: gym.vector.VectorEnv, agent: Agent
-    ) -> tuple[float, float, dict[str, float]]: ...
+    ) -> tuple[float, float, dict[str, float]]:
+        ...

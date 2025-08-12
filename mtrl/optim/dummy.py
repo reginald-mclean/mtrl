@@ -1,5 +1,5 @@
-import optax
 import jax
+import optax
 
 
 def dummy_multitask_optimizer() -> optax.GradientTransformation:

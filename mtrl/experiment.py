@@ -2,8 +2,8 @@
 
 import pathlib
 import random
-from dataclasses import dataclass
 import time
+from dataclasses import dataclass
 
 import jax
 import numpy as np
@@ -19,11 +19,7 @@ from mtrl.checkpoint import (
 )
 from mtrl.config.rl import AlgorithmConfig, OffPolicyTrainingConfig, TrainingConfig
 from mtrl.envs import EnvConfig
-from mtrl.rl.algorithms import (
-    Algorithm,
-    OffPolicyAlgorithm,
-    get_algorithm_for_config,
-)
+from mtrl.rl.algorithms import Algorithm, OffPolicyAlgorithm, get_algorithm_for_config
 from mtrl.types import CheckpointMetadata
 
 
@@ -61,9 +57,11 @@ class Experiment:
             ),
         )
         if checkpoint_manager.latest_step() is not None:
-            ckpt: Checkpoint = checkpoint_manager.restore(  # pyright: ignore [reportAssignmentType]
-                checkpoint_manager.latest_step(),
-                args=get_metadata_only_restore_args(),
+            ckpt: Checkpoint = (
+                checkpoint_manager.restore(  # pyright: ignore [reportAssignmentType]
+                    checkpoint_manager.latest_step(),
+                    args=get_metadata_only_restore_args(),
+                )
             )
             return ckpt["metadata"]
         else:
@@ -97,6 +95,13 @@ class Experiment:
             )
 
         envs = self.env.spawn(seed=self.seed)
+        eval_envs = None
+
+
+        if isinstance(envs, tuple):
+            envs, eval_envs = envs
+
+        print(envs, eval_envs)
 
         algorithm_cls = get_algorithm_for_config(self.algorithm)
         algorithm: Algorithm
@@ -147,7 +152,9 @@ class Experiment:
                 algorithm = ckpt["agent"]
 
                 if is_off_policy:
-                    buffer_checkpoint = ckpt["buffer"]  # pyright: ignore [reportTypedDictNotRequiredAccess]
+                    buffer_checkpoint = ckpt[
+                        "buffer"
+                    ]  # pyright: ignore [reportTypedDictNotRequiredAccess]
 
                 envs_checkpoint = ckpt["env_states"]
                 load_env_checkpoints(envs, envs_checkpoint)
@@ -170,6 +177,7 @@ class Experiment:
         agent = algorithm.train(
             config=self.training_config,
             envs=envs,
+            eval_envs=eval_envs,
             env_config=self.env,
             run_timestamp=self._timestamp,
             seed=self.seed,
@@ -181,8 +189,8 @@ class Experiment:
 
         # Cleanup
         if self.checkpoint:
-            mean_success_rate, mean_returns, mean_success_per_task = (
-                self.env.evaluate(envs, agent)
+            mean_success_rate, mean_returns, mean_success_per_task = self.env.evaluate(
+                envs, agent
             )
             final_metrics = {
                 "mean_success_rate": float(mean_success_rate),

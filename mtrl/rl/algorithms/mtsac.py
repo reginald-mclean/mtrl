@@ -87,9 +87,13 @@ def extract_task_weights(
     log_alpha: jax.Array
     task_weights: jax.Array
 
-    log_alpha = alpha_params["params"]["log_alpha"]  # pyright: ignore [reportAssignmentType]
+    log_alpha = alpha_params["params"][
+        "log_alpha"
+    ]  # pyright: ignore [reportAssignmentType]
     task_weights = jax.nn.softmax(-log_alpha)
-    task_weights = task_ids @ task_weights.reshape(-1, 1)  # pyright: ignore [reportAssignmentType]
+    task_weights = task_ids @ task_weights.reshape(
+        -1, 1
+    )  # pyright: ignore [reportAssignmentType]
     task_weights *= log_alpha.shape[0]
     return task_weights
 
@@ -103,6 +107,8 @@ class MTSACConfig(AlgorithmConfig):
     num_critics: int = 2
     tau: float = 0.005
     use_task_weights: bool = False
+    total_tasks: int = 10
+    max_q_value: float | None = None
 
 
 class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
@@ -117,30 +123,42 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
     split_actor_losses: bool = struct.field(pytree_node=False)
     split_critic_losses: bool = struct.field(pytree_node=False)
     num_critics: int = struct.field(pytree_node=False)
+    reset_critic_on_task_change: bool = struct.field(pytree_node=False)
+    reset_optimizer_on_task_change: bool = struct.field(pytree_node=False)
+    env_config: EnvConfig = struct.field(pytree_node=False)
+    sac_config: MTSACConfig = struct.field(pytree_node=False)
+    total_tasks: int = struct.field(pytree_node=False)
+    max_q_value: float | None = struct.field(pytree_node=False)
+
 
     @override
     @staticmethod
     def initialize(
         config: MTSACConfig, env_config: EnvConfig, seed: int = 1
     ) -> "MTSAC":
-        assert isinstance(env_config.action_space, gym.spaces.Box), (
-            "Non-box spaces currently not supported."
-        )
-        assert isinstance(env_config.observation_space, gym.spaces.Box), (
-            "Non-box spaces currently not supported."
-        )
+        assert isinstance(
+            env_config.action_space, gym.spaces.Box
+        ), "Non-box spaces currently not supported."
+        assert isinstance(
+            env_config.observation_space, gym.spaces.Box
+        ), "Non-box spaces currently not supported."
 
         master_key = jax.random.PRNGKey(seed)
-        algorithm_key, actor_init_key, critic_init_key, alpha_init_key = (
-            jax.random.split(master_key, 4)
-        )
+        (
+            algorithm_key,
+            actor_init_key,
+            critic_init_key,
+            alpha_init_key,
+        ) = jax.random.split(master_key, 4)
 
         actor_net = ContinuousActionPolicy(
             int(np.prod(env_config.action_space.shape)), config=config.actor_config
         )
+
         dummy_obs = jnp.array(
             [env_config.observation_space.sample() for _ in range(config.num_tasks)]
         )
+
         actor = TrainState.create(
             apply_fn=actor_net.apply,
             params=actor_net.init(actor_init_key, dummy_obs),
@@ -166,9 +184,9 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
         print("Critic Arch:", jax.tree_util.tree_map(jnp.shape, critic.params))
         print("Critic Params:", sum(x.size for x in jax.tree.leaves(critic.params)))
 
-        alpha_net = MultiTaskTemperature(config.num_tasks, config.initial_temperature)
+        alpha_net = MultiTaskTemperature(config.total_tasks, config.initial_temperature)
         dummy_task_ids = jnp.array(
-            [np.ones((config.num_tasks,)) for _ in range(config.num_tasks)]
+            [np.ones((config.total_tasks,)) for _ in range(config.total_tasks)]
         )
         alpha = TrainState.create(
             apply_fn=alpha_net.apply,
@@ -191,10 +209,24 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
             num_critics=config.num_critics,
             split_actor_losses=config.actor_config.network_config.optimizer.requires_split_task_losses,
             split_critic_losses=config.critic_config.network_config.optimizer.requires_split_task_losses,
+            reset_critic_on_task_change=env_config.reset_critic_on_task_change,
+            reset_optimizer_on_task_change=env_config.reset_optimizer_on_task_change,
+            env_config=env_config,
+            sac_config=config,
+            total_tasks=config.total_tasks,
+            max_q_value=config.max_q_value,
         )
 
     def reset(self, env_mask) -> None:
         pass
+
+    @override
+    def on_task_change(self, task_idx: int) -> None:
+        pass
+
+    @override
+    def should_early_terminate(self) -> bool:
+        return False
 
     @override
     def get_num_params(self) -> dict[str, int]:
@@ -204,6 +236,59 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
                 x.size for x in jax.tree.leaves(self.critic.params)
             ),
         }
+
+    @override
+    def on_task_start(self, current_task_idx: int) -> None:
+        pass
+
+    @override
+    def _handle_task_change(self, seed) -> None:
+        master_key = jax.random.PRNGKey(seed)
+        (
+            algorithm_key,
+            actor_init_key,
+            critic_init_key,
+            alpha_init_key,
+        ) = jax.random.split(master_key, 4)
+
+        dummy_obs = jnp.array(
+            [self.env_config.observation_space.sample()]
+        )
+
+        critic_cls = partial(QValueFunction, config=self.sac_config.critic_config)
+        critic_net = Ensemble(critic_cls, num=self.sac_config.num_critics)
+        dummy_action = jnp.array(
+            [self.env_config.action_space.sample()]
+        )
+        if self.reset_critic_on_task_change and self.reset_optimizer_on_task_change:
+            critic_init_params = critic_net.init(critic_init_key, dummy_obs, dummy_action)
+            critic = CriticTrainState.create(
+                apply_fn=critic_net.apply,
+                params=critic_init_params,
+                target_params=critic_init_params,
+                tx=self.sac_config.critic_config.network_config.optimizer.spawn(),
+            )
+            return self.replace(critic=critic, key=master_key)
+        if self.reset_critic_on_task_change:
+            critic_init_params = critic_net.init(critic_init_key, dummy_obs, dummy_action)
+            critic = CriticTrainState.create(
+                apply_fn=critic_net.apply,
+                params=critic_init_params,
+                target_params=critic_init_params,
+                tx=self.critic.tx, # config.critic_config.network_config.optimizer.spawn(),
+            )
+            return self.replace(critic=critic, key=master_key)
+        if self.reset_optimizer_on_task_change:
+            critic_init_params = critic_net.init(critic_init_key, dummy_obs, dummy_action)
+            critic = CriticTrainState.create(
+                apply_fn=critic_net.apply,
+                params=self.critic.params,
+                target_params=critic_init_params,
+                tx=self.sac_config.critic_config.network_config.optimizer.spawn(),
+            )
+            return self.replace(critic=critic, key=master_key)
+
+
 
     @override
     def sample_action(self, observation: Observation) -> tuple[Self, Action]:
@@ -294,9 +379,12 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
 
             q_pred = self.critic.apply_fn(params, _data.observations, _data.actions)
 
-            # HACK: Clipping Q values to approximate theoretical maximum for Metaworld
-            next_q_value = jnp.clip(next_q_value, -5000, 5000)
-            q_pred = jnp.clip(q_pred, -5000, 5000)
+            if self.max_q_value is not None:
+                # HACK: Clipping Q values to approximate theoretical maximum for Metaworld
+                next_q_value = jnp.clip(
+                    next_q_value, -self.max_q_value, self.max_q_value
+                )
+                q_pred = jnp.clip(q_pred, -self.max_q_value, self.max_q_value)
 
             if _task_weights is not None:
                 loss = (_task_weights * (q_pred - next_q_value) ** 2).mean()
@@ -426,7 +514,9 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
     ) -> tuple[Self, LogDict]:
         def alpha_loss(params: FrozenDict) -> Float[Array, ""]:
             log_alpha: jax.Array
-            log_alpha = task_ids @ params["params"]["log_alpha"].reshape(-1, 1)  # pyright: ignore [reportAttributeAccessIssue]
+            log_alpha = task_ids @ params["params"]["log_alpha"].reshape(
+                -1, 1
+            )  # pyright: ignore [reportAttributeAccessIssue]
             return (-log_alpha * (log_probs + self.target_entropy)).mean()
 
         alpha_loss_value, alpha_grads = jax.value_and_grad(alpha_loss)(
@@ -436,13 +526,14 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
 
         return self.replace(alpha=alpha), {
             "losses/alpha_loss": alpha_loss_value,
-            "alpha": jnp.exp(alpha.params["params"]["log_alpha"]).sum(),  # pyright: ignore [reportArgumentType]
+            "alpha": jnp.exp(
+                alpha.params["params"]["log_alpha"]
+            ).sum(),  # pyright: ignore [reportArgumentType]
         }
 
     @jax.jit
     def _update_inner(self, data: ReplayBufferSamples) -> tuple[Self, LogDict]:
-        task_ids = data.observations[..., -self.num_tasks :]
-
+        task_ids = data.observations[..., -self.total_tasks :]
         alpha_vals = self.alpha.apply_fn(self.alpha.params, task_ids)
         if self.use_task_weights:
             task_weights = extract_task_weights(self.alpha.params, task_ids)

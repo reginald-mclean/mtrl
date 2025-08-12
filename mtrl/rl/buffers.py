@@ -1,8 +1,8 @@
-from jaxtyping import Float
-
 import gymnasium as gym
 import numpy as np
 import numpy.typing as npt
+from jaxtyping import Float
+from scipy.ndimage import gaussian_filter1d
 
 from mtrl.types import (
     Action,
@@ -11,7 +11,6 @@ from mtrl.types import (
     ReplayBufferSamples,
     Rollout,
 )
-from scipy.ndimage import gaussian_filter1d
 
 
 class ReplayBuffer:
@@ -112,9 +111,10 @@ class ReplayBuffer:
             self.rewards[indices] = flat_reward
             self.dones[indices] = flat_done
 
-            self.pos = (self.pos + n_transitions) % self.capacity
-            if self.pos > self.capacity and not self.full:
+            self.pos = (self.pos + n_transitions)
+            if self.pos >= self.capacity and not self.full:
                 self.full = True
+            self.pos = self.pos % self.capacity
         else:
             self.obs[self.pos] = obs.copy()
             self.actions[self.pos] = action.copy()
@@ -177,6 +177,7 @@ class MultiTaskReplayBuffer:
         assert (
             total_capacity % num_tasks == 0
         ), "Total capacity must be divisible by the number of tasks."
+
         self.capacity = total_capacity // num_tasks
         self.num_tasks = num_tasks
         self._rng = np.random.default_rng(seed)
@@ -213,6 +214,8 @@ class MultiTaskReplayBuffer:
         self.dones = np.zeros((self.capacity, self.num_tasks, 1), dtype=np.float32)
         self.pos = 0
 
+        print('buffer init: ', self.obs.shape)
+
         if save_rewards:
             self.org_rewards = np.zeros(
                 (self.capacity, self.num_tasks, 1), dtype=np.float32
@@ -243,6 +246,27 @@ class MultiTaskReplayBuffer:
 
         self._rng.__setstate__(ckpt["rng_state"])
 
+    def add_single(
+        self,
+        obs: Float[Observation, " task"],
+        next_obs: Float[Observation, " task"],
+        action: Float[Action, " task"],
+        reward: Float[npt.NDArray, " task"],
+        done: Float[npt.NDArray, " task"],
+        seq_idx: int,
+    ) -> None:
+        self.obs[self.pos][seq_idx] = obs.copy()
+        self.actions[self.pos][seq_idx] = action.copy()
+        self.next_obs[self.pos][seq_idx] = next_obs.copy()
+        self.dones[self.pos][seq_idx] = done.copy()
+        self.rewards[self.pos][seq_idx] = reward
+
+        self.pos = self.pos + 1
+        if self.pos == self.capacity:
+            self.full = True
+
+        self.pos = self.pos % self.capacity
+
     def add(
         self,
         obs: Float[Observation, " task"],
@@ -256,6 +280,7 @@ class MultiTaskReplayBuffer:
         assert (
             obs.ndim == 2 and action.ndim == 2 and reward.ndim <= 2 and done.ndim <= 2
         )
+
         assert (
             obs.shape[0]
             == action.shape[0]

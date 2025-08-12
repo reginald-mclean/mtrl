@@ -79,7 +79,9 @@ class CARENetwork(nn.Module):
             use_bias=self.config.use_bias,
             activation_fn=self.config.activation,
             name="moe_mlp",
-        )(x)
+        )(
+            x
+        )
         chex.assert_shape(
             moe_out, (*x.shape[:-1], self.config.num_experts, self.config.embedding_dim)
         )

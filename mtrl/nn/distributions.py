@@ -1,5 +1,4 @@
 import distrax
-
 import jax
 
 
@@ -13,4 +12,6 @@ class TanhMultivariateNormalDiag(distrax.Transformed):
         )
 
     def mode(self) -> jax.Array:
-        return self.bijector.forward(self.distribution.mode())  # pyright: ignore [reportReturnType]
+        return self.bijector.forward(
+            self.distribution.mode()
+        )  # pyright: ignore [reportReturnType]

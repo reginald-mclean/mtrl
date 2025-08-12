@@ -1,8 +1,8 @@
 from mtrl.config.rl import AlgorithmConfig
 
 from .base import Algorithm, OffPolicyAlgorithm
+from .mtppo import MTPPO, MTPPOConfig
 from .mtsac import MTSAC, MTSACConfig
-from .mtppo import MTPPOConfig, MTPPO
 from .sac import SAC, SACConfig
 
 

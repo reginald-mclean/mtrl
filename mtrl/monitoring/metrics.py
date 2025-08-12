@@ -51,7 +51,8 @@ def get_dormant_neuron_logs(
     """Compute the dormant neuron ratio per layer using Equation 1 from
     "The Dormant Neuron Phenomenon in Deep Reinforcement Learning" (Sokar et al., 2023; https://proceedings.mlr.press/v202/sokar23a/sokar23a.pdf).
 
-    Adapted from https://github.com/google/dopamine/blob/master/dopamine/labs/redo/tfagents/sac_train_eval.py#L563"""
+    Adapted from https://github.com/google/dopamine/blob/master/dopamine/labs/redo/tfagents/sac_train_eval.py#L563
+    """
 
     all_layers_score: LayerActivationsDict = {}
     dormant_neurons = {}  # To store both mask and count for each layer

@@ -29,7 +29,9 @@ def get_nn_arch_for_config(
     elif type(config) is mtrl.config.nn.VanillaNetworkConfig:
         return VanillaNetwork
     else:
-        raise ValueError(f"Unknown config type: {type(config)}. (NeuralNetworkConfig by itself is not supported, use VanillaNeworkConfig)")
+        raise ValueError(
+            f"Unknown config type: {type(config)}. (NeuralNetworkConfig by itself is not supported, use VanillaNeworkConfig)"
+        )
 
 
 __all__ = ["VanillaNetwork", "MultiHeadNetwork", "SoftModularizationNetwork"]
