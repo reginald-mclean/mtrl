@@ -15,6 +15,7 @@ class OptimizerConfig:
     lr: float = 3e-4
     optimizer: Optimizer = Optimizer.Adam
     max_grad_norm: float | None = None
+    clip_mag: float | None = None
 
     @property
     def requires_split_task_losses(self) -> bool:
@@ -27,11 +28,19 @@ class OptimizerConfig:
             optim_kwargs["eps"] = 1e-7
 
         optim = self.optimizer(learning_rate=self.lr, **optim_kwargs)
+        chains = []
         if self.max_grad_norm is not None:
-            optim = optax.chain(
-                optax.clip_by_global_norm(self.max_grad_norm),
-                optim,
-            )
+            chains.append(optax.clip_by_global_norm(self.max_grad_norm))
+        if self.clip_mag:
+            chains.append(optax.clip(self.clip_mag))
+        if chains:
+           print('chains: ', chains)
+           optim = optax.chain(
+               *chains,
+               optim,
+           )
+           print(optim)
+
         return optim
 
 
