@@ -76,6 +76,18 @@ class ReplayBuffer:
 
         self._rng.__setstate__(ckpt["rng_state"])
 
+    def _advance_position(self, steps: int) -> None:
+        """Advance the write pointer and update the full flag when wrapping."""
+
+        if steps <= 0:
+            return
+
+        new_pos = self.pos + steps
+        if new_pos >= self.capacity:
+            self.full = True
+
+        self.pos = new_pos % self.capacity
+
     def add(
         self,
         obs: Observation,
@@ -103,7 +115,8 @@ class ReplayBuffer:
             n_transitions = len(flat_obs)
 
             # Handle buffer wraparound
-            indices = np.arange(self.pos, self.pos + n_transitions) % self.capacity
+            start = self.pos
+            indices = np.arange(start, start + n_transitions) % self.capacity
 
             # Store the transitions
             self.obs[indices] = flat_obs
@@ -112,9 +125,7 @@ class ReplayBuffer:
             self.rewards[indices] = flat_reward
             self.dones[indices] = flat_done
 
-            self.pos = (self.pos + n_transitions) % self.capacity
-            if self.pos > self.capacity and not self.full:
-                self.full = True
+            self._advance_position(n_transitions)
         else:
             self.obs[self.pos] = obs.copy()
             self.actions[self.pos] = action.copy()
@@ -122,11 +133,7 @@ class ReplayBuffer:
             self.dones[self.pos] = done.copy().reshape(-1, 1)
             self.rewards[self.pos] = reward.copy().reshape(-1, 1)
 
-            self.pos += 1
-
-        if self.pos > self.capacity and not self.full:
-            self.full = True
-        self.pos %= self.capacity
+            self._advance_position(1)
 
     def sample(self, batch_size: int) -> ReplayBufferSamples:
         sample_idx = self._rng.integers(
