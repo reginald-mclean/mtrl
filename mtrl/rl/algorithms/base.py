@@ -190,7 +190,7 @@ class OffPolicyAlgorithm(
                 self, logs = self.update(data)
 
                 # Logging
-                if global_step % 100 == 0:
+                if global_step % 10000 == 0:
                     sps_steps = (global_step - start_step) * envs.num_envs
                     sps = int(sps_steps / (time.time() - start_time))
                     print("SPS:", sps)
@@ -222,6 +222,14 @@ class OffPolicyAlgorithm(
 
                     if track:
                         wandb.log(eval_metrics, step=total_steps)
+
+                    if config.compute_network_metrics.value != 0:
+                        self, network_metrics = self.get_metrics(
+                            config.compute_network_metrics, data
+                        )
+
+                        if track:
+                            wandb.log(network_metrics, step=total_steps)
 
                     # Checkpointing
                     if checkpoint_manager is not None:

@@ -317,6 +317,8 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
                 next_action_log_probs,
                 task_weights,
             )
+            if not isinstance(self.actor.opt_state[0], PCGradState):
+                critic_grads = jax.tree.map(lambda x: x.mean(axis=0), critic_grads)
             flat_grads, _ = flatten_util.ravel_pytree(
                 jax.tree.map(lambda x: x.mean(axis=0), critic_grads)
             )
@@ -392,6 +394,8 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
                 in_axes=(None, 0, 0, 0),
                 out_axes=0,
             )(self.actor.params, data, alpha_val, task_weights)
+            if not isinstance(self.actor.opt_state[0], PCGradState):
+                actor_grads = jax.tree.map(lambda x: x.mean(axis=0), actor_grads)
             flat_grads, _ = flatten_util.ravel_pytree(
                 jax.tree.map(lambda x: x.mean(axis=0), actor_grads)
             )
