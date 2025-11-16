@@ -20,6 +20,9 @@ class Args:
     wandb_entity: str | None = None
     data_dir: Path = Path("./experiment_results")
     resume: bool = False
+    weights_critic_loss: bool = False
+    weights_actor_loss: bool = False
+    weights_qf_vals: bool = False
 
 
 def main() -> None:
@@ -27,8 +30,20 @@ def main() -> None:
 
     WIDTH = 512
 
+    weights_critic_loss=args.weights_critic_loss
+    weights_actor_loss=args.weights_actor_loss
+    weights_qf_vals=args.weights_qf_vals
+
+    base = ""
+    if weights_critic_loss:
+        base += "weights_critic_loss"
+    elif weights_actor_loss:
+        base += "weights_actor_loss"
+    elif weights_qf_vals:
+        base += "weights_qf_vals"
+
     experiment = Experiment(
-        exp_name=f"mt10_mtmhsac_v2_width_{WIDTH}",
+        exp_name=f"mt10_mtmhsac_v2_width_{WIDTH}_"+base,
         seed=args.seed,
         data_dir=args.data_dir,
         env=MetaworldConfig(
@@ -38,6 +53,9 @@ def main() -> None:
         algorithm=MTSACConfig(
             num_tasks=10,
             gamma=0.99,
+            weights_critic_loss=weights_critic_loss,
+            weights_actor_loss=weights_actor_loss,
+            weights_qf_vals=weights_qf_vals,
             actor_config=ContinuousActionPolicyConfig(
                 network_config=MultiHeadConfig(
                     width=WIDTH,
@@ -58,8 +76,13 @@ def main() -> None:
             total_steps=int(2e7),
             buffer_size=int(1e6),
             batch_size=1280,
+            sampler_type="Sampler",
+            update_weights_every=10000, # this is really * num_envs
+            weights_critic_loss=weights_critic_loss,
+            weights_actor_loss=weights_actor_loss,
+            weights_qf_vals=weights_qf_vals,
         ),
-        checkpoint=True,
+        checkpoint=False,
         resume=args.resume,
     )
 
