@@ -19,6 +19,8 @@ from mtrl.config.rl import (
 from mtrl.config.utils import Metrics
 from mtrl.envs import EnvConfig
 from mtrl.rl.buffers import MultiTaskReplayBuffer, MultiTaskRolloutBuffer
+from mtrl.rl.sampling_algs import Sampler, AdaptiveSampler
+
 from mtrl.types import (
     Action,
     Agent,
@@ -135,6 +137,19 @@ class OffPolicyAlgorithm(
         if buffer_checkpoint is not None:
             replay_buffer.load_checkpoint(buffer_checkpoint)
 
+
+        if config.sampler_type == 'Sampler':
+            sampler = Sampler()
+        elif config.sampler_type == "AdaptiveSampler":
+            sampler = AdaptiveSampler(n_tasks=envs.num_envs, ema_alpha=config.ema_alpha, temperature=config.temperature)
+        else:
+            sampler = None
+
+        if sampler:
+            batch_size = sampler.sample_batch_sizes(np.array([envs.num_envs for _ in range(envs.num_envs)]), config.batch_size)
+        else:
+            batch_size = config.batch_size
+
         start_time = time.time()
 
         for global_step in range(start_step, config.total_steps // envs.num_envs):
@@ -186,17 +201,29 @@ class OffPolicyAlgorithm(
 
             if global_step > config.warmstart_steps:
                 # Update the agent with data
-                data = replay_buffer.sample(config.batch_size)
+                data = replay_buffer.sample(batch_size)
                 self, logs = self.update(data)
+
+                if global_step % config.update_weights_every == 0:
+                    self, update_logs = self.compute_weights(data)
+                    if config.weights_critic_loss:
+                       weights = update_logs['split_critic_loss']
+                    elif config.weights_actor_loss:
+                       weights = update_logs['split_actor_loss']
+                    elif config.weights_qf_vals:
+                       weights = update_logs['split_qf_values']
+
+                    batch_size = sampler.sample_batch_sizes(np.array(weights), config.batch_size)
 
                 # Logging
                 if global_step % 10000 == 0:
                     sps_steps = (global_step - start_step) * envs.num_envs
                     sps = int(sps_steps / (time.time() - start_time))
                     print("SPS:", sps)
+                    print({f"task_{idx}_batch_size": val for idx, val in enumerate(batch_size)})
 
                     if track:
-                        wandb.log({"charts/SPS": sps} | logs, step=total_steps)
+                        wandb.log({"charts/SPS": sps}| {f"task_{idx}_batch_size": val for idx, val in enumerate(batch_size)} | logs, step=total_steps)
 
                 # Evaluation
                 if (
