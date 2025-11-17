@@ -204,7 +204,7 @@ class OffPolicyAlgorithm(
                 data = replay_buffer.sample(batch_size)
                 self, logs = self.update(data)
 
-                if global_step % config.update_weights_every == 0:
+                if sampler and global_step % config.update_weights_every == 0:
                     self, update_logs = self.compute_weights(data)
                     if config.weights_critic_loss:
                        weights = update_logs['split_critic_loss']
@@ -220,10 +220,11 @@ class OffPolicyAlgorithm(
                     sps_steps = (global_step - start_step) * envs.num_envs
                     sps = int(sps_steps / (time.time() - start_time))
                     print("SPS:", sps)
-                    print({f"task_{idx}_batch_size": val for idx, val in enumerate(batch_size)})
 
                     if track:
-                        wandb.log({"charts/SPS": sps}| {f"task_{idx}_batch_size": val for idx, val in enumerate(batch_size)} | logs, step=total_steps)
+                        if sampler: 
+                            logs = logs | {f"task_{idx}_batch_size": val for idx, val in enumerate(batch_size)}
+                        wandb.log({"charts/SPS": sps}| logs, step=total_steps)
 
                 # Evaluation
                 if (

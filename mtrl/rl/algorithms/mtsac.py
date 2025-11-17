@@ -584,8 +584,6 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
         actor_alpha_vals = critic_alpha_vals = alpha_vals
         actor_task_weights = critic_task_weights = task_weights
         alpha_val_indices = None
-        split_actor_loss_value = split_critic_loss_value = split_qf_values = None
-
 
         if self.split_critic_losses or self.split_actor_losses:
             split_data, _ = self.split_data_by_tasks(data, task_ids)
@@ -614,6 +612,7 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
         self, log_probs, actor_logs = self.update_actor(
             actor_data, actor_alpha_vals, actor_task_weights
         )
+
         if self.split_actor_losses:
             assert alpha_val_indices is not None
             log_probs = self.unsplit_data_by_tasks(log_probs, alpha_val_indices)
@@ -645,9 +644,6 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
             **alpha_logs,
             **critic_optim_logs,
             **actor_optim_logs,
-            "split_critic_loss": None if split_critic_loss_value is None else jnp.array(split_critic_loss_value),
-            "split_actor_loss": None if split_actor_loss_value is None else jnp.array(split_actor_loss_value),
-            "split_qf_values": None if split_qf_values is None else jnp.array(split_qf_values)
         }
 
     @override

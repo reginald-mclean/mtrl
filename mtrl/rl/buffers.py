@@ -244,21 +244,9 @@ class MultiTaskReplayBuffer:
         self._action_shape = np.array(env_action_space.shape).prod()
         self.full = False
 
-        # all needed for reward smoothing --> Reggie's original idea about scale and smoothness mattering
-        self.max_steps = max_steps
-        self.reward_filter = reward_filter
-        self.sigma = sigma
-        self.alpha = alpha
-        self.delta = delta
-        self.filter_mode = filter_mode
-        self.current_trajectory_start = 0
+        self.reset()
 
-        if not self.reward_filter:
-            self.reset(save_rewards=False)  # Init buffer
-        else:
-            self.reset(save_rewards=True)  # Init buffer saving original rewards
-
-    def reset(self, save_rewards=False):
+    def reset(self):
         """Reinitialize the buffer."""
         self.obs = np.zeros(
             (self.capacity, self.num_tasks, self._obs_shape), dtype=np.float32
@@ -272,12 +260,6 @@ class MultiTaskReplayBuffer:
         )
         self.dones = np.zeros((self.capacity, self.num_tasks, 1), dtype=np.float32)
         self.pos = 0
-
-        if save_rewards:
-            self.org_rewards = np.zeros(
-                (self.capacity, self.num_tasks, 1), dtype=np.float32
-            )
-            self.traj_start = 0
 
     def checkpoint(self) -> ReplayBufferCheckpoint:
         return {
@@ -340,6 +322,7 @@ class MultiTaskReplayBuffer:
         self.actions[self.pos] = action.copy()
         self.next_obs[self.pos] = next_obs.copy()
         self.dones[self.pos] = done.copy().reshape(-1, 1)
+        self.rewards[self.pos] = reward.reshape(-1, 1).copy()
 
         self._advance_position(1)
 
@@ -429,6 +412,7 @@ class MultiTaskReplayBuffer:
                 ),
                 size=(single_task_batch_size,),
             )
+
             batch = (
                 self.obs[sample_idx],
                 self.actions[sample_idx],
@@ -436,7 +420,6 @@ class MultiTaskReplayBuffer:
                 self.dones[sample_idx],
                 self.rewards[sample_idx],
             )
-
             mt_batch_size = single_task_batch_size * self.num_tasks
             batch = map(lambda x: x.reshape(mt_batch_size, *x.shape[2:]), batch)
 
