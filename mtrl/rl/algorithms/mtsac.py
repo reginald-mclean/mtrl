@@ -28,6 +28,9 @@ from mtrl.monitoring.metrics import (
     get_dormant_neuron_logs,
 )
 from mtrl.optim.pcgrad import PCGradState
+from mtrl.optim.gradnorm import GradNormState
+from mtrl.optim.cagrad import CAGradState
+
 from mtrl.rl.networks import ContinuousActionPolicy, Ensemble, QValueFunction
 from mtrl.types import (
     Action,
@@ -117,6 +120,11 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
     split_actor_losses: bool = struct.field(pytree_node=False)
     split_critic_losses: bool = struct.field(pytree_node=False)
     num_critics: int = struct.field(pytree_node=False)
+    return_split_actor_losses: bool = struct.field(pytree_node=False)
+    return_split_critic_losses: bool = struct.field(pytree_node=False)
+    explore: bool = struct.field(pytree_node=False)
+    clip: bool = struct.field(pytree_node=False)
+
 
     @override
     @staticmethod
@@ -178,6 +186,8 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
 
         target_entropy = -np.prod(env_config.action_space.shape).item()
 
+        print(config)
+
         return MTSAC(
             num_tasks=config.num_tasks,
             actor=actor,
@@ -191,6 +201,10 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
             num_critics=config.num_critics,
             split_actor_losses=config.actor_config.network_config.optimizer.requires_split_task_losses,
             split_critic_losses=config.critic_config.network_config.optimizer.requires_split_task_losses,
+            return_split_actor_losses=config.weights_actor_loss,
+            return_split_critic_losses=config.weights_critic_loss or config.weights_qf_vals,
+            explore=False,
+            clip=config.clip,
         )
 
     def reset(self, env_mask) -> None:
@@ -295,8 +309,9 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
             q_pred = self.critic.apply_fn(params, _data.observations, _data.actions)
 
             # HACK: Clipping Q values to approximate theoretical maximum for Metaworld
-            next_q_value = jnp.clip(next_q_value, -5000, 5000)
-            q_pred = jnp.clip(q_pred, -5000, 5000)
+            if self.clip: # or (not isinstance(self.actor.opt_state[0], PCGradState) and not isinstance(self.actor.opt_state[0], GradNormState)):
+                next_q_value = jnp.clip(next_q_value, -5000, 5000)
+                q_pred = jnp.clip(q_pred, -5000, 5000)
 
             if _task_weights is not None:
                 loss = (_task_weights * (q_pred - next_q_value) ** 2).mean()
@@ -317,6 +332,8 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
                 next_action_log_probs,
                 task_weights,
             )
+            if not isinstance(self.actor.opt_state[0], PCGradState) and not isinstance(self.actor.opt_state[0], GradNormState) and not isinstance(self.actor.opt_state[0], CAGradState):
+                critic_grads = jax.tree.map(lambda x: x.mean(axis=0), critic_grads)
             flat_grads, _ = flatten_util.ravel_pytree(
                 jax.tree.map(lambda x: x.mean(axis=0), critic_grads)
             )
@@ -370,6 +387,7 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
             _data: ReplayBufferSamples,
             _alpha_val: Float[Array, "batch 1"],
             _task_weights: Float[Array, "batch 1"] | None = None,
+            _explore: bool = True
         ):
             action_samples, log_probs = self.actor.apply_fn(
                 params, _data.observations
@@ -384,21 +402,31 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
                 loss = (task_weights * (_alpha_val * log_probs - min_qf_values)).mean()
             else:
                 loss = (_alpha_val * log_probs - min_qf_values).mean()
-            return loss, log_probs
+
+            if _explore:
+                exp_loss = jnp.mean(jnp.square(_data.actions - action_samples))
+            else:
+                exp_loss = 0.0
+
+            loss -= exp_loss
+
+            return loss, (log_probs, exp_loss)
 
         if self.split_actor_losses:
-            (actor_loss_value, log_probs), actor_grads = jax.vmap(
+            (actor_loss_value, (log_probs, exp_loss)), actor_grads = jax.vmap(
                 jax.value_and_grad(actor_loss, has_aux=True),
                 in_axes=(None, 0, 0, 0),
                 out_axes=0,
             )(self.actor.params, data, alpha_val, task_weights)
+            if not isinstance(self.actor.opt_state[0], PCGradState) and not isinstance(self.actor.opt_state[0], GradNormState) and not isinstance(self.actor.opt_state[0], CAGradState):
+                actor_grads = jax.tree.map(lambda x: x.mean(axis=0), actor_grads)
             flat_grads, _ = flatten_util.ravel_pytree(
                 jax.tree.map(lambda x: x.mean(axis=0), actor_grads)
             )
         else:
-            (actor_loss_value, log_probs), actor_grads = jax.value_and_grad(
+            (actor_loss_value, (log_probs, exp_loss)), actor_grads = jax.value_and_grad(
                 actor_loss, has_aux=True
-            )(self.actor.params, data, alpha_val, task_weights)
+            )(self.actor.params, data, alpha_val, task_weights, self.explore)
             flat_grads, _ = flatten_util.ravel_pytree(actor_grads)
 
         key, optimizer_key = jax.random.split(key)
@@ -415,6 +443,7 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
             "losses/actor_loss": actor_loss_value.mean(),
             "metrics/actor_grad_magnitude": jnp.linalg.norm(flat_grads),
             "metrics/actor_params_norm": jnp.linalg.norm(flat_params_act),
+            "metrics/explore_loss": exp_loss
         }
 
         return (self.replace(actor=actor, key=key), log_probs, logs)
@@ -438,6 +467,130 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
             "losses/alpha_loss": alpha_loss_value,
             "alpha": jnp.exp(alpha.params["params"]["log_alpha"]).sum(),  # pyright: ignore [reportArgumentType]
         }
+
+    @jax.jit
+    def compute_weights(self, data: ReplayBufferSamples) -> tuple[Self, LogDict]:
+        task_ids = data.observations[..., -self.num_tasks :]
+        alpha_vals = self.alpha.apply_fn(self.alpha.params, task_ids)
+        if self.use_task_weights:
+            task_weights = extract_task_weights(self.alpha.params, task_ids)
+        else:
+            task_weights = None
+
+        actor_data = critic_data = data
+        actor_alpha_vals = critic_alpha_vals = alpha_vals
+        actor_task_weights = critic_task_weights = task_weights
+        alpha_val_indices = None
+        split_actor_loss_value = split_critic_loss_value = split_qf_values = None
+
+        split_data, _ = self.split_data_by_tasks(data, task_ids)
+        split_alpha_vals, alpha_val_indices = self.split_data_by_tasks(
+            alpha_vals, task_ids
+        )
+        split_task_weights, _ = (
+            self.split_data_by_tasks(task_weights, task_ids)
+            if task_weights is not None
+            else (None, None)
+        )
+        if self.return_split_critic_losses:
+            critic_data = split_data
+            critic_alpha_vals = split_alpha_vals
+            critic_task_weights = split_task_weights
+            key, critic_loss_key = jax.random.split(self.key)
+            self = self.replace(key=key)
+
+            next_actions, next_action_log_probs = jax.vmap(
+                lambda x: self.actor.apply_fn(self.actor.params, x).sample_and_log_prob(
+                    seed=critic_loss_key
+                )
+            )(critic_data.observations)
+            q_values = jax.vmap(self.critic.apply_fn, in_axes=(None, 0, 0))(
+                self.critic.target_params, critic_data.next_observations, next_actions
+            )
+
+            def critic_loss(
+                params: FrozenDict,
+                _data: ReplayBufferSamples,
+                _q_values: Float[Array, "#batch 1"],
+                _alpha_val: Float[Array, "#batch 1"],
+                _next_action_log_probs: Float[Array, " #batch"],
+                _task_weights: Float[Array, "#batch 1"] | None = None,
+            ) -> tuple[Float[Array, ""], Float[Array, ""]]:
+                # next_action_log_probs is (B,) shaped because of the sum(axis=1), while Q values are (B, 1)
+                min_qf_next_target = jnp.min(
+                    _q_values, axis=0
+                ) - _alpha_val * _next_action_log_probs.reshape(-1, 1)
+
+                next_q_value = jax.lax.stop_gradient(
+                    _data.rewards + (1 - _data.dones) * self.gamma * min_qf_next_target
+                )
+
+                q_pred = self.critic.apply_fn(params, _data.observations, _data.actions)
+                # HACK: Clipping Q values to approximate theoretical maximum for Metaworld
+                if self.clip: # and not isinstance(self.actor.opt_state[0], PCGradState) and not isinstance(self.actor.opt_state[0], GradNormState):
+                    next_q_value = jnp.clip(next_q_value, -5000, 5000)
+                    q_pred = jnp.clip(q_pred, -5000, 5000)
+
+                if _task_weights is not None:
+                    loss = (_task_weights * (q_pred - next_q_value) ** 2).mean()
+                else:
+                    loss = ((q_pred - next_q_value) ** 2).mean()
+                return loss, q_pred.mean()
+
+            split_critic_loss_value, split_qf_values = jax.vmap(
+                critic_loss,
+                in_axes=(None, 0, 0, 0, 0, 0),
+                out_axes=0,
+            )(
+                self.critic.params,
+                critic_data,
+                q_values,
+                critic_alpha_vals,
+                next_action_log_probs,
+                critic_task_weights,
+            )
+
+
+        if self.return_split_actor_losses:
+            actor_data = split_data
+            actor_alpha_vals = split_alpha_vals
+            actor_task_weights = split_task_weights
+            key, actor_loss_key = jax.random.split(self.key)
+
+            def actor_loss(
+                params: FrozenDict,
+                _data: ReplayBufferSamples,
+                _alpha_val: Float[Array, "batch 1"],
+                _task_weights: Float[Array, "batch 1"] | None = None,
+            ):
+                action_samples, log_probs = self.actor.apply_fn(
+                    params, _data.observations
+                ).sample_and_log_prob(seed=actor_loss_key)
+                log_probs = log_probs.reshape(-1, 1)
+
+                q_values = self.critic.apply_fn(
+                    self.critic.params, _data.observations, action_samples
+                )
+                min_qf_values = jnp.min(q_values, axis=0)
+                if _task_weights is not None:
+                    loss = (task_weights * (_alpha_val * log_probs - min_qf_values)).mean()
+                else:
+                    loss = (_alpha_val * log_probs - min_qf_values).mean()
+                return loss, log_probs
+
+            split_actor_loss_value, _ = jax.vmap(
+                actor_loss,
+                in_axes=(None, 0, 0, 0),
+                out_axes=0,
+            )(self.actor.params, actor_data, actor_alpha_vals, actor_task_weights)
+            self = self.replace(key=key)
+
+        return self, {
+            "split_critic_loss": None if split_critic_loss_value is None else jnp.array(split_critic_loss_value),
+            "split_actor_loss": None if split_actor_loss_value is None else jnp.array(split_actor_loss_value),
+            "split_qf_values": None if split_qf_values is None else jnp.array(split_qf_values)
+        }
+
 
     @jax.jit
     def _update_inner(self, data: ReplayBufferSamples) -> tuple[Self, LogDict]:
@@ -481,6 +634,7 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
         self, log_probs, actor_logs = self.update_actor(
             actor_data, actor_alpha_vals, actor_task_weights
         )
+
         if self.split_actor_losses:
             assert alpha_val_indices is not None
             log_probs = self.unsplit_data_by_tasks(log_probs, alpha_val_indices)
@@ -494,7 +648,7 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
                 f"metrics/critic_{key}": value
                 for key, value in self.critic.opt_state[0]._asdict().items()
             }
-            if isinstance(self.critic.opt_state[0], PCGradState)
+            if isinstance(self.critic.opt_state[0], PCGradState) or isinstance(self.actor.opt_state[0], GradNormState) or isinstance(self.actor.opt_state[0], CAGradState)
             else {}
         )
         actor_optim_logs = (
@@ -502,7 +656,7 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
                 f"metrics/actor_{key}": value
                 for key, value in self.actor.opt_state[0]._asdict().items()
             }
-            if isinstance(self.actor.opt_state[0], PCGradState)
+            if isinstance(self.actor.opt_state[0], PCGradState) or isinstance(self.actor.opt_state[0], GradNormState) or isinstance(self.actor.opt_state[0], CAGradState)
             else {}
         )
 

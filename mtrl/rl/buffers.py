@@ -135,23 +135,83 @@ class ReplayBuffer:
 
             self._advance_position(1)
 
-    def sample(self, batch_size: int) -> ReplayBufferSamples:
-        sample_idx = self._rng.integers(
-            low=0,
-            high=max(self.pos if not self.full else self.capacity, batch_size),
-            size=(batch_size,),
-        )
+    def sample(
+        self,
+        batch_size: int | np.ndarray,
+    ) -> ReplayBufferSamples:
+        """Sample a batch with optional per-task batch size control.
 
-        batch = (
-            self.obs[sample_idx],
-            self.actions[sample_idx],
-            self.next_obs[sample_idx],
-            self.dones[sample_idx],
-            self.rewards[sample_idx],
-        )
+        Args:
+            batch_size: The total batch size. Must be divisible by number of tasks
+                       if per_task_batch_sizes is None.
+            per_task_batch_sizes: Optional array of shape [num_tasks] specifying
+                                 how many samples to draw from each task.
+                                 If provided, must sum to batch_size.
+
+        Returns:
+            ReplayBufferSamples: A batch of samples of batch shape (batch_size,).
+        """
+        buffer_size = self.pos if not self.full else self.capacity
+        if isinstance(batch_size, np.ndarray):
+            # Adaptive sampling - different batch sizes per task
+            per_task_batch_sizes = np.asarray(batch_size, dtype=int)
+            assert len(per_task_batch_sizes) == self.num_tasks, \
+                f"per_task_batch_sizes length ({len(per_task_batch_sizes)}) must equal num_tasks ({self.num_tasks})"
+            assert per_task_batch_sizes.sum() == (128 * self.num_tasks), \
+                f"per_task_batch_sizes must sum to batch_size ({batch_size}), got {per_task_batch_sizes.sum()}"
+            # Sample different amounts from each task
+            all_obs = []
+            all_actions = []
+            all_next_obs = []
+            all_dones = []
+            all_rewards = []
+            for task_idx in range(self.num_tasks):
+                task_batch_size = per_task_batch_sizes[task_idx]
+                if task_batch_size > 0:
+                    # Sample indices for this task
+                    sample_idx = self._rng.integers(
+                        low=0,
+                        high=buffer_size,
+                        size=(task_batch_size,),
+                    )
+                    # Gather samples for this task
+                    all_obs.append(self.obs[sample_idx, task_idx])
+                    all_actions.append(self.actions[sample_idx, task_idx])
+                    all_next_obs.append(self.next_obs[sample_idx, task_idx])
+                    all_dones.append(self.dones[sample_idx, task_idx])
+                    all_rewards.append(self.rewards[sample_idx, task_idx])
+            # Concatenate all task samples
+            batch = (
+                np.concatenate(all_obs, axis=0),
+                np.concatenate(all_actions, axis=0),
+                np.concatenate(all_next_obs, axis=0),
+                np.concatenate(all_dones, axis=0),
+                np.concatenate(all_rewards, axis=0),
+            )
+        else:
+            # Uniform sampling - same batch size for each task (original behavior)
+            assert batch_size % self.num_tasks == 0, \
+                "Batch size must be divisible by the number of tasks."
+            single_task_batch_size = batch_size // self.num_tasks
+            sample_idx = self._rng.integers(
+                low=0,
+                high=max(
+                self.pos if not self.full else self.capacity, single_task_batch_size
+                ),
+                size=(single_task_batch_size,),
+            )
+            batch = (
+                self.obs[sample_idx],
+                self.actions[sample_idx],
+                self.next_obs[sample_idx],
+                self.dones[sample_idx],
+                self.rewards[sample_idx],
+            )
+
+            mt_batch_size = single_task_batch_size * self.num_tasks
+            batch = map(lambda x: x.reshape(mt_batch_size, *x.shape[2:]), batch)
 
         return ReplayBufferSamples(*batch)
-
 
 class MultiTaskReplayBuffer:
     """Replay buffer for the multi-task benchmarks.
@@ -191,21 +251,9 @@ class MultiTaskReplayBuffer:
         self._action_shape = np.array(env_action_space.shape).prod()
         self.full = False
 
-        # all needed for reward smoothing --> Reggie's original idea about scale and smoothness mattering
-        self.max_steps = max_steps
-        self.reward_filter = reward_filter
-        self.sigma = sigma
-        self.alpha = alpha
-        self.delta = delta
-        self.filter_mode = filter_mode
-        self.current_trajectory_start = 0
+        self.reset()
 
-        if not self.reward_filter:
-            self.reset(save_rewards=False)  # Init buffer
-        else:
-            self.reset(save_rewards=True)  # Init buffer saving original rewards
-
-    def reset(self, save_rewards=False):
+    def reset(self):
         """Reinitialize the buffer."""
         self.obs = np.zeros(
             (self.capacity, self.num_tasks, self._obs_shape), dtype=np.float32
@@ -219,12 +267,6 @@ class MultiTaskReplayBuffer:
         )
         self.dones = np.zeros((self.capacity, self.num_tasks, 1), dtype=np.float32)
         self.pos = 0
-
-        if save_rewards:
-            self.org_rewards = np.zeros(
-                (self.capacity, self.num_tasks, 1), dtype=np.float32
-            )
-            self.traj_start = 0
 
     def checkpoint(self) -> ReplayBufferCheckpoint:
         return {
@@ -249,6 +291,18 @@ class MultiTaskReplayBuffer:
             setattr(self, key, ckpt["data"][key])
 
         self._rng.__setstate__(ckpt["rng_state"])
+
+    def _advance_position(self, steps: int) -> None:
+        """Advance the write pointer and update the full flag when wrapping."""
+
+        if steps <= 0:
+            return
+
+        new_pos = self.pos + steps
+        if new_pos >= self.capacity:
+            self.full = True
+
+        self.pos = new_pos % self.capacity
 
     def add(
         self,
@@ -275,55 +329,10 @@ class MultiTaskReplayBuffer:
         self.actions[self.pos] = action.copy()
         self.next_obs[self.pos] = next_obs.copy()
         self.dones[self.pos] = done.copy().reshape(-1, 1)
+        self.rewards[self.pos] = reward.reshape(-1, 1).copy()
 
-        """Add a batch of samples to the buffer.
+        self._advance_position(1)
 
-        It is assumed that the observation has a one-hot task embedding as its suffix.
-
-        # gaussian rewards = gaussian_filter1d(rewards_buffer, args.sigma, mode=args.filter_mode, axis=0)
-        # exponential
-        #           rewards = np.zeros_like(rewards_buffer)
-        #           rewards[-1, :] = rewards_buffer[0, :]
-        #           beta = 1 - args.alpha
-        #           for i, rew_raw in enumerate(rewards_buffer):
-        #               rewards[i, :] = args.alpha * rewards[i - 1, :] + beta * rew_raw
-
-        # uniform uniform  filter = (1.0 / args.delta) * np.array([1] * args.delta)
-
-        # uniform before   filter = (1.0/args.delta) * np.array([1] * args.delta + [0] * (args.delta-1))
-
-        # uniform after    filter = (1.0 / args.delta) * np.array([0] * (args.delta - 1) + [1] * args.delta)
-
-        # uniform generic application  rewards = convolve1d(rewards_buffer, filter, mode=args.filter_mode, axis=0)
-        """
-
-        if not self.reward_filter:
-            self.rewards[self.pos] = reward.reshape(-1, 1).copy()
-        else:
-            self.org_rewards[self.pos] = reward.reshape(-1, 1).copy()
-
-        if self.reward_filter:
-            if self.reward_filter == "gaussian":
-                assert self.sigma is not None and self.filter_mode is not None
-                window_size = int(self.sigma * 4)
-                current_version = self.pos % self.max_steps
-                version_start = self.pos - current_version
-                start = max(version_start, self.pos - window_size)
-                size = self.pos - start
-                if size > 1:
-                    self.rewards[self.pos] = gaussian_filter1d(
-                        self.org_rewards[start : self.pos, :],
-                        sigma=self.sigma,
-                        mode=self.filter_mode,
-                    )[-1, :].copy()
-                else:
-                    self.rewards[self.pos] = reward.reshape(-1, 1).copy()
-
-        self.pos = self.pos + 1
-        if self.pos == self.capacity:
-            self.full = True
-
-        self.pos = self.pos % self.capacity
 
     def single_task_sample(self, task_idx: int, batch_size: int) -> ReplayBufferSamples:
         assert task_idx < self.num_tasks, "Task index out of bounds."
@@ -344,41 +353,84 @@ class MultiTaskReplayBuffer:
 
         return ReplayBufferSamples(*batch)
 
-    def sample(self, batch_size: int) -> ReplayBufferSamples:
-        """Sample a batch of size `single_task_batch_size` for each task.
+    def sample(
+        self,
+        batch_size: int | np.ndarray,
+    ) -> ReplayBufferSamples:
+        """Sample a batch with optional per-task batch size control.
 
         Args:
-            batch_size (int): The total batch size. Must be divisible by number of tasks
+            batch_size: The total batch size. Must be divisible by number of tasks
+                       if per_task_batch_sizes is None.
+            per_task_batch_sizes: Optional array of shape [num_tasks] specifying
+                                 how many samples to draw from each task.
+                                 If provided, must sum to batch_size.
 
         Returns:
             ReplayBufferSamples: A batch of samples of batch shape (batch_size,).
         """
-        assert (
-            batch_size % self.num_tasks == 0
-        ), "Batch size must be divisible by the number of tasks."
-        single_task_batch_size = batch_size // self.num_tasks
-
-        sample_idx = self._rng.integers(
-            low=0,
-            high=max(
+        buffer_size = self.pos if not self.full else self.capacity
+        if isinstance(batch_size, np.ndarray):
+            # Adaptive sampling - different batch sizes per task
+            assert len(batch_size) == self.num_tasks, \
+                f"batch_size length ({len(batch_size)}) must equal num_tasks ({self.num_tasks})"
+            assert batch_size.sum() == (128 * self.num_tasks), \
+                f"per_task_batch_sizes must sum to batch_size ({batch_size}), got {batch_size.sum()}"
+            # Sample different amounts from each task
+            all_obs = []
+            all_actions = []
+            all_next_obs = []
+            all_dones = []
+            all_rewards = []
+            for task_idx in range(self.num_tasks):
+                task_batch_size = batch_size[task_idx]
+                if task_batch_size > 0:
+                    # Sample indices for this task
+                    sample_idx = self._rng.integers(
+                        low=0,
+                        high=max(
+                            self.pos if not self.full else self.capacity, task_batch_size
+                        ),
+                        size=(task_batch_size,),
+                    )
+                    # Gather samples for this task
+                    all_obs.append(self.obs[sample_idx, task_idx])
+                    all_actions.append(self.actions[sample_idx, task_idx])
+                    all_next_obs.append(self.next_obs[sample_idx, task_idx])
+                    all_dones.append(self.dones[sample_idx, task_idx])
+                    all_rewards.append(self.rewards[sample_idx, task_idx])
+            # Concatenate all task samples
+            batch = (
+                np.concatenate(all_obs, axis=0),
+                np.concatenate(all_actions, axis=0),
+                np.concatenate(all_next_obs, axis=0),
+                np.concatenate(all_dones, axis=0),
+                np.concatenate(all_rewards, axis=0),
+            )
+        else:
+            # Uniform sampling - same batch size for each task (original behavior)
+            assert batch_size % self.num_tasks == 0, \
+                "Batch size must be divisible by the number of tasks."
+            single_task_batch_size = batch_size // self.num_tasks
+            sample_idx = self._rng.integers(
+                low=0,
+                high=max(
                 self.pos if not self.full else self.capacity, single_task_batch_size
-            ),
-            size=(single_task_batch_size,),
-        )
+                ),
+                size=(single_task_batch_size,),
+            )
 
-        batch = (
-            self.obs[sample_idx],
-            self.actions[sample_idx],
-            self.next_obs[sample_idx],
-            self.dones[sample_idx],
-            self.rewards[sample_idx],
-        )
-
-        mt_batch_size = single_task_batch_size * self.num_tasks
-        batch = map(lambda x: x.reshape(mt_batch_size, *x.shape[2:]), batch)
+            batch = (
+                self.obs[sample_idx],
+                self.actions[sample_idx],
+                self.next_obs[sample_idx],
+                self.dones[sample_idx],
+                self.rewards[sample_idx],
+            )
+            mt_batch_size = single_task_batch_size * self.num_tasks
+            batch = map(lambda x: x.reshape(mt_batch_size, *x.shape[2:]), batch)
 
         return ReplayBufferSamples(*batch)
-
 
 class MultiTaskRolloutBuffer:
     num_rollout_steps: int

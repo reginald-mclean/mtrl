@@ -7,7 +7,10 @@ from .utils import Metrics
 class AlgorithmConfig:
     num_tasks: int
     gamma: float = 0.99
-
+    weights_critic_loss: bool = False
+    weights_actor_loss: bool = False
+    weights_qf_vals: bool = False
+    clip: bool = False
 
 @dataclass(frozen=True, kw_only=True)
 class TrainingConfig:
@@ -21,6 +24,12 @@ class TrainingConfig:
     reward_filter_alpha: float | None = None
     reward_filter_delta: float | None = None
     reward_filter_mode: str | None = None
+    sampler_type: str | None = None
+    update_weights_every: int = 500
+    weights_critic_loss: bool = False
+    weights_actor_loss: bool = False
+    weights_qf_vals: bool = False
+    state_coverage:bool = False
 
 
 @dataclass(frozen=True)
@@ -28,7 +37,6 @@ class OffPolicyTrainingConfig(TrainingConfig):
     warmstart_steps: int = int(4e3)
     buffer_size: int = int(1e6)
     batch_size: int = 1280
-
 
 @dataclass(frozen=True)
 class OnPolicyTrainingConfig(TrainingConfig):

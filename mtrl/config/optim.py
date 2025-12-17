@@ -6,6 +6,7 @@ import optax
 from mtrl.optim.dummy import dummy_multitask_optimizer
 from mtrl.optim.gradnorm import gradnorm
 from mtrl.optim.pcgrad import pcgrad
+from mtrl.optim.cagrad import cagrad
 
 from .utils import Optimizer
 
@@ -70,6 +71,8 @@ class GradNormConfig(OptimizerConfig):
     gradnorm_optimizer: OptimizerConfig
     initial_weights: jax.Array | None = None
     asymmetry: float = 0.12
+    max_grad_norm: float | None = None
+
 
     @property
     def requires_split_task_losses(self) -> bool:
@@ -82,6 +85,27 @@ class GradNormConfig(OptimizerConfig):
                 num_tasks=self.num_tasks,
                 asymmetry=self.asymmetry,
                 initial_weights=self.initial_weights,
+                max_grad_norm=self.max_grad_norm,
+            ),
+            super().spawn(),
+        )
+
+@dataclass(frozen=True, kw_only=True)
+class CAGradConfig(OptimizerConfig):
+    num_tasks: int
+    cagrad_optimizer: OptimizerConfig
+    initial_weights: jax.Array | None = None
+    max_grad_norm: float | None = None
+
+
+    @property
+    def requires_split_task_losses(self) -> bool:
+        return True
+
+    def spawn(self) -> optax.GradientTransformation:
+        return optax.chain(
+            cagrad(
+                num_tasks=self.num_tasks,
             ),
             super().spawn(),
         )

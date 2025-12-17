@@ -4,8 +4,8 @@ from pathlib import Path
 import tyro
 
 from mtrl.config.networks import ContinuousActionPolicyConfig, QValueFunctionConfig
-from mtrl.config.nn import MultiHeadConfig
-from mtrl.config.optim import GradNormConfig, OptimizerConfig
+from mtrl.config.nn import MultiHeadConfig, NeuralNetworkConfig, VanillaNetworkConfig
+from mtrl.config.optim import OptimizerConfig, GradNormConfig
 from mtrl.config.rl import OffPolicyTrainingConfig
 from mtrl.envs import MetaworldConfig
 from mtrl.experiment import Experiment
@@ -20,13 +20,14 @@ class Args:
     wandb_entity: str | None = None
     data_dir: Path = Path("./experiment_results")
     resume: bool = False
-
+    clip: bool = False
+    width: int = 400
 
 def main() -> None:
     args = tyro.cli(Args)
 
     experiment = Experiment(
-        exp_name="mt10_mtmhsac_gradnorm",
+        exp_name=f"mt10_mtmhsac_GradNorm_clip_{args.width}" if args.clip else f"mt10_mtmhsac_GradNorm_no_clip_{args.width}",
         seed=args.seed,
         data_dir=args.data_dir,
         env=MetaworldConfig(
@@ -36,25 +37,28 @@ def main() -> None:
         algorithm=MTSACConfig(
             num_tasks=10,
             gamma=0.99,
+            clip=args.clip,
             actor_config=ContinuousActionPolicyConfig(
-                network_config=MultiHeadConfig(
-                    num_tasks=10,
+                network_config=VanillaNetworkConfig(
+                    #num_tasks=10,
+                    width=args.width,
                     optimizer=GradNormConfig(
                         num_tasks=10,
                         max_grad_norm=1.0,
                         asymmetry=0.12,
-                        gradnorm_optimizer=OptimizerConfig(),
+                        gradnorm_optimizer=OptimizerConfig(max_grad_norm=1.0),
                     ),
                 )
             ),
             critic_config=QValueFunctionConfig(
-                network_config=MultiHeadConfig(
-                    num_tasks=10,
+                network_config=VanillaNetworkConfig(
+                    #num_tasks=10,
+                    width=args.width,
                     optimizer=GradNormConfig(
                         num_tasks=10,
                         max_grad_norm=1.0,
                         asymmetry=0.12,
-                        gradnorm_optimizer=OptimizerConfig(),
+                        gradnorm_optimizer=OptimizerConfig(max_grad_norm=1.0),
                     ),
                 )
             ),
