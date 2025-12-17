@@ -4,12 +4,13 @@ from pathlib import Path
 import tyro
 
 from mtrl.config.networks import ContinuousActionPolicyConfig, QValueFunctionConfig
-from mtrl.config.nn import MultiHeadConfig
-from mtrl.config.optim import DummyMultiTaskConfig, OptimizerConfig, PCGradConfig, GradNormConfig
+from mtrl.config.nn import MultiHeadConfig, NeuralNetworkConfig, VanillaNetworkConfig
+from mtrl.config.optim import OptimizerConfig, CAGradConfig
 from mtrl.config.rl import OffPolicyTrainingConfig
 from mtrl.envs import MetaworldConfig
 from mtrl.experiment import Experiment
 from mtrl.rl.algorithms import MTSACConfig
+
 
 
 @dataclass(frozen=True)
@@ -18,54 +19,59 @@ class Args:
     track: bool = False
     wandb_project: str | None = None
     wandb_entity: str | None = None
-    data_dir: Path = Path("./results")
+    data_dir: Path = Path("./experiment_results")
     resume: bool = False
-    width: int = 400
     clip: bool = False
-    reward_func_version: str = 'v2'
+    width: int = 400
+    reward_func_version: str = "v2"
+
 
 def main() -> None:
     args = tyro.cli(Args)
 
-    num_tasks = 10
-
-    width = args.width
-
     experiment = Experiment(
-        exp_name=f"mt10_mtmhsac_pcgrad_{width}_no_clip_q_vals" if not args.clip else f"mt10_mtmhsac_pcgrad_{width}_clip_q_vals",
+        exp_name=f"mt10_mtmhsac_CAGrad_clip_{args.width}_rf_{args.reward_func_version}" if args.clip else f"mt10_mtmhsac_CAGrad_no_clip_{args.width}_rf_{args.reward_func_version}",
         seed=args.seed,
         data_dir=args.data_dir,
         env=MetaworldConfig(
             env_id="MT10",
-            terminate_on_success=False,
             reward_func_version=args.reward_func_version,
+            terminate_on_success=False,
         ),
         algorithm=MTSACConfig(
-            num_tasks=num_tasks,
+            num_tasks=10,
             gamma=0.99,
             clip=args.clip,
             actor_config=ContinuousActionPolicyConfig(
-                network_config=MultiHeadConfig(
-                    num_tasks=num_tasks,
-                    width=width,
-                    optimizer=PCGradConfig(num_tasks=num_tasks, max_grad_norm=1.0, cosine_sim_logs=True),
+                network_config=VanillaNetworkConfig(
+                    #num_tasks=10,
+                    width=args.width,
+                    optimizer=CAGradConfig(
+                        num_tasks=10,
+                        max_grad_norm=1.0,
+                        cagrad_optimizer=OptimizerConfig(max_grad_norm=1.0),
+                    ),
                 )
             ),
             critic_config=QValueFunctionConfig(
-                network_config=MultiHeadConfig(
-                    num_tasks=num_tasks,
-                    width=width,
-                    optimizer=PCGradConfig(num_tasks=num_tasks, max_grad_norm=1.0, cosine_sim_logs=True),
+                network_config=VanillaNetworkConfig(
+                    #num_tasks=10,
+                    width=args.width,
+                    optimizer=CAGradConfig(
+                        num_tasks=10,
+                        max_grad_norm=1.0,
+                        cagrad_optimizer=OptimizerConfig(max_grad_norm=1.0),
+                    ),
                 )
             ),
             num_critics=2,
         ),
         training_config=OffPolicyTrainingConfig(
-            total_steps=int(2_000_000 * num_tasks),
-            buffer_size=int(100_000 * num_tasks),
-            batch_size=128 * num_tasks,
+            total_steps=int(2e7),
+            buffer_size=int(1e6),
+            batch_size=1280,
         ),
-        checkpoint=False,
+        checkpoint=True,
         resume=args.resume,
     )
 

@@ -9,6 +9,8 @@ import orbax.checkpoint as ocp
 import wandb
 from flax import struct
 
+from metaworld.env_dict import MT10_V3, MT50_V3
+
 from mtrl.checkpoint import get_checkpoint_save_args
 from mtrl.config.rl import (
     AlgorithmConfig,
@@ -17,6 +19,7 @@ from mtrl.config.rl import (
     TrainingConfig,
 )
 from mtrl.config.utils import Metrics
+from mtrl.monitoring.metrics import MultiTaskCoverageAnalyzer, UMAPCoverageTracker, LSHVisitationCounter, compute_grid_coverage_jax, compute_grid_coverage_numpy
 from mtrl.envs import EnvConfig
 from mtrl.rl.buffers import MultiTaskReplayBuffer, MultiTaskRolloutBuffer
 from mtrl.rl.sampling_algs import Sampler, AdaptiveSampler
@@ -150,6 +153,24 @@ class OffPolicyAlgorithm(
         else:
             batch_size = config.batch_size
 
+        task_name = []
+        if config.state_coverage:
+            if env_config.env_id == "MT10":
+                task_names = list(MT10_V3.keys())
+            elif env_config.env_id == "MT50":
+                task_names = list(MT50_V3.keys())
+            else:
+                raise NotImplementedError
+
+            analyzer = UMAPCoverageTracker(
+                grid_size=50
+            )
+
+
+
+        else:
+            analyzer = None
+
         start_time = time.time()
 
         for global_step in range(start_step, config.total_steps // envs.num_envs):
@@ -203,6 +224,7 @@ class OffPolicyAlgorithm(
                 # Update the agent with data
                 data = replay_buffer.sample(batch_size)
                 self, logs = self.update(data)
+                update_logs = None
 
                 if sampler and global_step % config.update_weights_every == 0:
                     self, update_logs = self.compute_weights(data)
@@ -222,9 +244,42 @@ class OffPolicyAlgorithm(
                     print("SPS:", sps)
 
                     if track:
-                        if sampler: 
-                            logs = logs | {f"task_{idx}_batch_size": val for idx, val in enumerate(batch_size)}
+                        if sampler:
+                            if update_logs:
+                                if config.weights_critic_loss:
+                                    weights = update_logs['split_critic_loss']
+                                elif config.weights_actor_loss:
+                                    weights = update_logs['split_actor_loss']
+                                elif config.weights_qf_vals:
+                                    weights = update_logs['split_qf_values']
+                                logs = logs | {f"weight_{idx}": val for idx, val in enumerate(weights)}
+                                logs = logs | {f"task_{idx}_batch_size": val for idx, val in enumerate(batch_size)}
                         wandb.log({"charts/SPS": sps}| logs, step=total_steps)
+
+                if analyzer and (global_step == (config.warmstart_steps + 1) or global_step % int(100_000) == 0):
+                    print("Computing UMAP")
+                    state_metrics = {}
+                    data = replay_buffer.sample(1024*self.num_tasks)
+                    task_ids = data.observations[..., -self.num_tasks :]
+                    split_data, _ = self.split_data_by_tasks(data, task_ids)
+                    ts = split_data.observations
+
+                    for idx in range(envs.num_envs):
+                        analyzer.add_data(ts[idx], labels=task_names[idx])
+                    state_metrics = analyzer.compute_coverage()
+                    per_task = analyzer.compute_coverage_by_label()
+
+                    print(state_metrics)
+                    print(per_task)
+
+                    s_metrics = {}
+                    for key, value in per_task.items():
+                        s_metrics[f"coverage/{key}"] = value
+
+                    print(s_metrics, {"umap_coverage": state_metrics, "unique_states": analyzer.get_num_states()})
+
+                    if track:
+                        wandb.log({"umap_coverage": state_metrics, "unique_states": analyzer.get_num_states()} | s_metrics, step=total_steps)
 
                 # Evaluation
                 if (
@@ -251,13 +306,12 @@ class OffPolicyAlgorithm(
                     if track:
                         wandb.log(eval_metrics, step=total_steps)
 
-                    if config.compute_network_metrics.value != 0:
-                        self, network_metrics = self.get_metrics(
-                            config.compute_network_metrics, data
-                        )
+                    self, network_metrics = self.get_metrics(
+                        config.compute_network_metrics, data
+                    )
 
-                        if track:
-                            wandb.log(network_metrics, step=total_steps)
+                    if track:
+                        wandb.log(network_metrics, step=total_steps)
 
                     # Checkpointing
                     if checkpoint_manager is not None:

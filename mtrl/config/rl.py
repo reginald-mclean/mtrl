@@ -10,6 +10,7 @@ class AlgorithmConfig:
     weights_critic_loss: bool = False
     weights_actor_loss: bool = False
     weights_qf_vals: bool = False
+    clip: bool = False
 
 @dataclass(frozen=True, kw_only=True)
 class TrainingConfig:
@@ -28,6 +29,7 @@ class TrainingConfig:
     weights_critic_loss: bool = False
     weights_actor_loss: bool = False
     weights_qf_vals: bool = False
+    state_coverage:bool = False
 
 
 @dataclass(frozen=True)
