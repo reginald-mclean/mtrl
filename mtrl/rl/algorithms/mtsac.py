@@ -487,13 +487,39 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
         split_alpha_vals, alpha_val_indices = self.split_data_by_tasks(
             alpha_vals, task_ids
         )
+
         split_task_weights, _ = (
             self.split_data_by_tasks(task_weights, task_ids)
             if task_weights is not None
             else (None, None)
         )
-        if self.return_split_critic_losses:
-            critic_data = split_data
+        def vmap_cos_sim(grads, num_tasks):
+            def calc_cos_sim(selected_grad, grads):
+                new_cos_sim = jnp.array(
+                    [
+                        jnp.sum(selected_grad * grads, axis=1)
+                        / (
+                            jnp.linalg.norm(selected_grad)
+                            * jnp.linalg.norm(grads, axis=1)
+                            + 1e-8
+                        )
+                    ]
+                )
+                return new_cos_sim
+
+            cos_sim_mat = jax.vmap(calc_cos_sim, in_axes=(0, None), out_axes=-1)(
+                grads, grads
+            )
+            # Get upper triangle
+            mask = jnp.triu(jnp.ones((num_tasks, num_tasks)), k=1)
+            num_unique = mask.sum()
+
+            masked_cos_sim = mask * cos_sim_mat
+            # n in upper triangle
+            avg_cos_sim = masked_cos_sim.flatten().sum() / (num_unique + 1e-8)
+            return avg_cos_sim
+
+        if True: #self.return_split_critic_losses:
             critic_alpha_vals = split_alpha_vals
             critic_task_weights = split_task_weights
             key, critic_loss_key = jax.random.split(self.key)
@@ -503,9 +529,9 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
                 lambda x: self.actor.apply_fn(self.actor.params, x).sample_and_log_prob(
                     seed=critic_loss_key
                 )
-            )(critic_data.observations)
+            )(split_data.observations)
             q_values = jax.vmap(self.critic.apply_fn, in_axes=(None, 0, 0))(
-                self.critic.target_params, critic_data.next_observations, next_actions
+                self.critic.target_params, split_data.next_observations, next_actions
             )
 
             def critic_loss(
@@ -537,22 +563,27 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
                     loss = ((q_pred - next_q_value) ** 2).mean()
                 return loss, q_pred.mean()
 
-            split_critic_loss_value, split_qf_values = jax.vmap(
-                critic_loss,
+
+            (_, _), critic_grads = jax.vmap(
+                jax.value_and_grad(critic_loss, has_aux=True),
                 in_axes=(None, 0, 0, 0, 0, 0),
                 out_axes=0,
             )(
                 self.critic.params,
-                critic_data,
+                split_data,
                 q_values,
-                critic_alpha_vals,
+                split_alpha_vals,
                 next_action_log_probs,
-                critic_task_weights,
+                task_weights,
             )
+            flat_task_gradients = jax.vmap(lambda x: jax.flatten_util.ravel_pytree(x)[0])(
+                critic_grads
+            )
+            critic_avg_cos_sim = vmap_cos_sim(flat_task_gradients, self.num_tasks)
+            critic_avg_grad_magnitude = (jnp.linalg.norm(flat_task_gradients, axis=1)).mean()
 
-
-        if self.return_split_actor_losses:
-            actor_data = split_data
+        if True: # self.return_split_actor_losses:
+            split_data = split_data
             actor_alpha_vals = split_alpha_vals
             actor_task_weights = split_task_weights
             key, actor_loss_key = jax.random.split(self.key)
@@ -578,17 +609,24 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
                     loss = (_alpha_val * log_probs - min_qf_values).mean()
                 return loss, log_probs
 
-            split_actor_loss_value, _ = jax.vmap(
-                actor_loss,
+
+            (_, _), actor_grads = jax.vmap(
+                jax.value_and_grad(actor_loss, has_aux=True),
                 in_axes=(None, 0, 0, 0),
                 out_axes=0,
-            )(self.actor.params, actor_data, actor_alpha_vals, actor_task_weights)
-            self = self.replace(key=key)
+            )(self.actor.params, split_data, split_alpha_vals, task_weights)
+
+            flat_task_gradients = jax.vmap(lambda x: jax.flatten_util.ravel_pytree(x)[0])(
+                actor_grads
+            )
+            actor_avg_cos_sim = vmap_cos_sim(flat_task_gradients, self.num_tasks)
+            actor_avg_grad_magnitude = (jnp.linalg.norm(flat_task_gradients, axis=1)).mean()
 
         return self, {
-            "split_critic_loss": None if split_critic_loss_value is None else jnp.array(split_critic_loss_value),
-            "split_actor_loss": None if split_actor_loss_value is None else jnp.array(split_actor_loss_value),
-            "split_qf_values": None if split_qf_values is None else jnp.array(split_qf_values)
+            "critic_avg_cos_sim": critic_avg_cos_sim,
+            "critic_avg_grad_magnitude": critic_avg_grad_magnitude,
+            "actor_avg_cos_sim": actor_avg_cos_sim,
+            "actor_avg_grad_magnitude": actor_avg_grad_magnitude,
         }
 
 

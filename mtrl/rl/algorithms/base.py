@@ -140,37 +140,6 @@ class OffPolicyAlgorithm(
         if buffer_checkpoint is not None:
             replay_buffer.load_checkpoint(buffer_checkpoint)
 
-
-        if config.sampler_type == 'Sampler':
-            sampler = Sampler()
-        elif config.sampler_type == "AdaptiveSampler":
-            sampler = AdaptiveSampler(n_tasks=envs.num_envs, ema_alpha=config.ema_alpha, temperature=config.temperature)
-        else:
-            sampler = None
-
-        if sampler:
-            batch_size = sampler.sample_batch_sizes(np.array([envs.num_envs for _ in range(envs.num_envs)]), config.batch_size)
-        else:
-            batch_size = config.batch_size
-
-        task_name = []
-        if config.state_coverage:
-            if env_config.env_id == "MT10":
-                task_names = list(MT10_V3.keys())
-            elif env_config.env_id == "MT50":
-                task_names = list(MT50_V3.keys())
-            else:
-                raise NotImplementedError
-
-            analyzer = UMAPCoverageTracker(
-                grid_size=50
-            )
-
-
-
-        else:
-            analyzer = None
-
         start_time = time.time()
 
         for global_step in range(start_step, config.total_steps // envs.num_envs):
@@ -222,64 +191,14 @@ class OffPolicyAlgorithm(
 
             if global_step > config.warmstart_steps:
                 # Update the agent with data
-                data = replay_buffer.sample(batch_size)
+                data = replay_buffer.sample(config.batch_size)
                 self, logs = self.update(data)
-                update_logs = None
-
-                if sampler and global_step % config.update_weights_every == 0:
-                    self, update_logs = self.compute_weights(data)
-                    if config.weights_critic_loss:
-                       weights = update_logs['split_critic_loss']
-                    elif config.weights_actor_loss:
-                       weights = update_logs['split_actor_loss']
-                    elif config.weights_qf_vals:
-                       weights = update_logs['split_qf_values']
-
-                    batch_size = sampler.sample_batch_sizes(np.array(weights), config.batch_size)
 
                 # Logging
                 if global_step % 10000 == 0:
                     sps_steps = (global_step - start_step) * envs.num_envs
                     sps = int(sps_steps / (time.time() - start_time))
                     print("SPS:", sps)
-
-                    if track:
-                        if sampler:
-                            if update_logs:
-                                if config.weights_critic_loss:
-                                    weights = update_logs['split_critic_loss']
-                                elif config.weights_actor_loss:
-                                    weights = update_logs['split_actor_loss']
-                                elif config.weights_qf_vals:
-                                    weights = update_logs['split_qf_values']
-                                logs = logs | {f"weight_{idx}": val for idx, val in enumerate(weights)}
-                                logs = logs | {f"task_{idx}_batch_size": val for idx, val in enumerate(batch_size)}
-                        wandb.log({"charts/SPS": sps}| logs, step=total_steps)
-
-                if analyzer and (global_step == (config.warmstart_steps + 1) or global_step % int(100_000) == 0):
-                    print("Computing UMAP")
-                    state_metrics = {}
-                    data = replay_buffer.sample(1024*self.num_tasks)
-                    task_ids = data.observations[..., -self.num_tasks :]
-                    split_data, _ = self.split_data_by_tasks(data, task_ids)
-                    ts = split_data.observations
-
-                    for idx in range(envs.num_envs):
-                        analyzer.add_data(ts[idx], labels=task_names[idx])
-                    state_metrics = analyzer.compute_coverage()
-                    per_task = analyzer.compute_coverage_by_label()
-
-                    print(state_metrics)
-                    print(per_task)
-
-                    s_metrics = {}
-                    for key, value in per_task.items():
-                        s_metrics[f"coverage/{key}"] = value
-
-                    print(s_metrics, {"umap_coverage": state_metrics, "unique_states": analyzer.get_num_states()})
-
-                    if track:
-                        wandb.log({"umap_coverage": state_metrics, "unique_states": analyzer.get_num_states()} | s_metrics, step=total_steps)
 
                 # Evaluation
                 if (
@@ -309,6 +228,11 @@ class OffPolicyAlgorithm(
                     self, network_metrics = self.get_metrics(
                         config.compute_network_metrics, data
                     )
+
+                    self, update_logs = self.compute_weights(data)
+
+                    if track:
+                        wandb.log(update_logs)
 
                     if track:
                         wandb.log(network_metrics, step=total_steps)
