@@ -19,10 +19,8 @@ from mtrl.config.rl import (
     TrainingConfig,
 )
 from mtrl.config.utils import Metrics
-from mtrl.monitoring.metrics import MultiTaskCoverageAnalyzer, UMAPCoverageTracker, LSHVisitationCounter, compute_grid_coverage_jax, compute_grid_coverage_numpy
 from mtrl.envs import EnvConfig
 from mtrl.rl.buffers import MultiTaskReplayBuffer, MultiTaskRolloutBuffer
-from mtrl.rl.sampling_algs import Sampler, AdaptiveSampler
 
 from mtrl.types import (
     Action,
