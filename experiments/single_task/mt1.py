@@ -14,13 +14,14 @@ from mtrl.rl.algorithms import SACConfig
 
 @dataclass(frozen=True)
 class Args:
-    seed: int = 1
+    train_seed: int = 1
+    test_seed: int = 1
     track: bool = False
     wandb_project: str | None = None
     wandb_entity: str | None = None
-    data_dir: Path = Path("./experiment_results")
+    data_dir: Path = Path("./results")
     resume: bool = False
-
+    task_name: str = "reach-v3"
 
 def main() -> None:
     args = tyro.cli(Args)
@@ -28,12 +29,13 @@ def main() -> None:
     num_tasks = 1
 
     experiment = Experiment(
-        exp_name="mt1_peg_insert_side",
-        seed=args.seed,
+        exp_name=f"mt1_{args.task_name}",
+        train_seed=args.train_seed,
+        test_seed=args.test_seed,
         data_dir=args.data_dir,
         env=MetaworldConfig(
             env_id="MT1",
-            task_name="peg-insert-side-v3",
+            task_name=args.task_name,
             terminate_on_success=False,
         ),
         algorithm=SACConfig(
@@ -54,12 +56,12 @@ def main() -> None:
             num_critics=2,
         ),
         training_config=OffPolicyTrainingConfig(
-            evaluation_frequency=200,
+            evaluation_frequency=20,
             total_steps=int(2_000_000),
             buffer_size=int(100_000),
             batch_size=128,
         ),
-        checkpoint=True,
+        checkpoint=False,
         resume=args.resume,
     )
 

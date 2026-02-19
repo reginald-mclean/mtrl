@@ -78,7 +78,8 @@ class Algorithm(
     def train(
         self,
         config: TrainingConfigType,
-        envs: gym.vector.VectorEnv,
+        train_envs: gym.vector.VectorEnv,
+        test_envs: gym.vector.VectorEnv,
         env_config: EnvConfig,
         run_timestamp: str,
         seed: int = 1,
@@ -113,7 +114,8 @@ class OffPolicyAlgorithm(
     def train(
         self,
         config: OffPolicyTrainingConfig,
-        envs: gym.vector.VectorEnv,
+        train_envs: gym.vector.VectorEnv,
+        test_envs: gym.vector.VectorEnv,
         env_config: EnvConfig,
         run_timestamp: str,
         seed: int = 1,
@@ -125,9 +127,9 @@ class OffPolicyAlgorithm(
         global_episodic_return: Deque[float] = deque([], maxlen=20 * self.num_tasks)
         global_episodic_length: Deque[int] = deque([], maxlen=20 * self.num_tasks)
 
-        obs, _ = envs.reset()
+        obs, _ = train_envs.reset()
 
-        done = np.full((envs.num_envs,), False)
+        done = np.full((train_envs.num_envs,), False)
         start_step, episodes_ended = 0, 0
 
         if checkpoint_metadata is not None:
@@ -140,15 +142,15 @@ class OffPolicyAlgorithm(
 
         start_time = time.time()
 
-        for global_step in range(start_step, config.total_steps // envs.num_envs):
-            total_steps = global_step * envs.num_envs
+        for global_step in range(start_step, config.total_steps // train_envs.num_envs):
+            total_steps = global_step * train_envs.num_envs
 
             if global_step < config.warmstart_steps:
-                actions = envs.action_space.sample()
+                actions = train_envs.action_space.sample()
             else:
                 self, actions = self.sample_action(obs)
 
-            next_obs, rewards, terminations, truncations, infos = envs.step(actions)
+            next_obs, rewards, terminations, truncations, infos = train_envs.step(actions)
             done = np.logical_or(terminations, truncations)
 
             buffer_obs = next_obs
@@ -163,10 +165,10 @@ class OffPolicyAlgorithm(
             for i, env_ended in enumerate(done):
                 if env_ended:
                     global_episodic_return.append(
-                        infos["final_info"]["episode"]["r"][i]
+                        infos["episode"]["r"][i]
                     )
                     global_episodic_length.append(
-                        infos["final_info"]["episode"]["l"][i]
+                        infos["episode"]["l"][i]
                     )
                     episodes_ended += 1
 
@@ -194,7 +196,7 @@ class OffPolicyAlgorithm(
 
                 # Logging
                 if global_step % 10000 == 0:
-                    sps_steps = (global_step - start_step) * envs.num_envs
+                    sps_steps = (global_step - start_step) * train_envs.num_envs
                     sps = int(sps_steps / (time.time() - start_time))
                     print("SPS:", sps)
 
@@ -205,35 +207,39 @@ class OffPolicyAlgorithm(
                     and done.any()
                     and global_step > 0
                 ):
-                    mean_success_rate, mean_returns, mean_success_per_task = (
-                        env_config.evaluate(envs, self)
-                    )
-                    eval_metrics = {
-                        "charts/mean_success_rate": float(mean_success_rate),
-                        "charts/mean_evaluation_return": float(mean_returns),
-                    } | {
-                        f"charts/{task_name}_success_rate": float(success_rate)
-                        for task_name, success_rate in mean_success_per_task.items()
-                    }
-                    print(
-                        f"total_steps={total_steps}, mean evaluation success rate: {mean_success_rate:.4f}"
-                        + f" return: {mean_returns:.4f}"
-                    )
 
-                    if track:
-                        wandb.log(eval_metrics, step=total_steps)
+                    for envs in [(train_envs, "train"), (test_envs, "test")]:
+                        env, split = envs
+                        mean_success_rate, mean_returns, mean_success_per_task = (
+                            env_config.evaluate(env, self)
+                        )
+                        eval_metrics = {
+                            f"charts/{split}_mean_success_rate": float(mean_success_rate),
+                            f"charts/{split}_mean_evaluation_return": float(mean_returns),
+                        } | {
+                            f"charts/{split}_{task_name}_success_rate": float(success_rate)
+                            for task_name, success_rate in mean_success_per_task.items()
+                        }
+                        print(
+                            f"total_steps={total_steps}, {split} mean evaluation success rate: {mean_success_rate:.4f}"
+                            + f" return: {mean_returns:.4f}"
+                        )
+                        if track:
+                            wandb.log(eval_metrics, step=total_steps)
 
                     self, network_metrics = self.get_metrics(
                         config.compute_network_metrics, data
                     )
 
-                    self, update_logs = self.compute_weights(data)
-
-                    if track:
-                        wandb.log(update_logs)
-
                     if track:
                         wandb.log(network_metrics, step=total_steps)
+
+                    if hasattr(self, "compute_weights"):
+                        self, update_logs = self.compute_weights(data)
+                        if track:
+                            wandb.log(update_logs, step=total_steps)
+
+                    
 
                     # Checkpointing
                     if checkpoint_manager is not None:
@@ -246,7 +252,7 @@ class OffPolicyAlgorithm(
                             total_steps,
                             args=get_checkpoint_save_args(
                                 self,
-                                envs,
+                                train_envs,
                                 global_step,
                                 episodes_ended,
                                 run_timestamp,
@@ -259,7 +265,7 @@ class OffPolicyAlgorithm(
                         )
 
                     # Reset envs again to exit eval mode
-                    obs, _ = envs.reset()
+                    obs, _ = train_envs.reset()
 
         return self
 
@@ -303,7 +309,7 @@ class OnPolicyAlgorithm(
         global_episodic_return: Deque[float] = deque([], maxlen=20 * self.num_tasks)
         global_episodic_length: Deque[int] = deque([], maxlen=20 * self.num_tasks)
 
-        obs, _ = envs.reset()
+        obs, _ = train_envs.reset()
 
         episode_started = np.ones((envs.num_envs,))
         start_step, episodes_ended = 0, 0
@@ -341,14 +347,14 @@ class OnPolicyAlgorithm(
             for i, env_ended in enumerate(episode_started):
                 if env_ended:
                     global_episodic_return.append(
-                        infos["final_info"]["episode"]["r"][i]
+                        infos["episode"]["r"][i]
                     )
                     global_episodic_length.append(
-                        infos["final_info"]["episode"]["l"][i]
+                        infos["episode"]["l"][i]
                     )
                     episodes_ended += 1
 
-            if global_step % 500 == 0 and global_episodic_return:
+            if global_step % 1000 == 0 and global_episodic_return:
                 print(
                     f"global_step={total_steps}, mean_episodic_return={np.mean(list(global_episodic_return))}"
                 )

@@ -190,9 +190,7 @@ class ReplayBuffer:
             )
         else:
             # Uniform sampling - same batch size for each task (original behavior)
-            assert batch_size % self.num_tasks == 0, \
-                "Batch size must be divisible by the number of tasks."
-            single_task_batch_size = batch_size // self.num_tasks
+            single_task_batch_size = batch_size
             sample_idx = self._rng.integers(
                 low=0,
                 high=max(
@@ -207,9 +205,6 @@ class ReplayBuffer:
                 self.dones[sample_idx],
                 self.rewards[sample_idx],
             )
-
-            mt_batch_size = single_task_batch_size * self.num_tasks
-            batch = map(lambda x: x.reshape(mt_batch_size, *x.shape[2:]), batch)
 
         return ReplayBufferSamples(*batch)
 

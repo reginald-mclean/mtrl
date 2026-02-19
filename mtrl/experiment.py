@@ -30,7 +30,8 @@ from mtrl.types import CheckpointMetadata
 @dataclass
 class Experiment:
     exp_name: str
-    seed: int
+    train_seed: int
+    test_seed: int
     data_dir: pathlib.Path
 
     env: EnvConfig
@@ -48,7 +49,7 @@ class Experiment:
         self._timestamp = str(int(time.time()))
 
     def _get_data_dir(self) -> pathlib.Path:
-        return self.data_dir / f"{self.exp_name}_{self.seed}"
+        return self.data_dir / f"{self.exp_name}_{self.train_seed}"
 
     def _get_latest_checkpoint_metadata(self) -> CheckpointMetadata | None:
         checkpoint_manager = ocp.CheckpointManager(
@@ -79,11 +80,11 @@ class Experiment:
                 print(
                     "WARNING: Resume is on, a checkpoint was found, but there's no timestamp in the checkpoint."
                 )
-                run_id = f"{self.exp_name}_{self.seed}"
+                run_id = f"{self.exp_name}_{self.train_seed}"
             else:
-                run_id = f"{existing_run_timestamp}_{self.exp_name}_{self.seed}"
+                run_id = f"{existing_run_timestamp}_{self.exp_name}_{self.train_seed}"
         else:
-            run_id = f"{self._timestamp}_{self.exp_name}_{self.seed}"
+            run_id = f"{self._timestamp}_{self.exp_name}_{self.train_seed}"
 
         self._wandb_run_id = run_id
         wandb.init(
@@ -96,11 +97,11 @@ class Experiment:
                 "No accelerator found, aborting. Devices: %s" % jax.devices()
             )
 
-        envs = self.env.spawn(seed=self.seed)
-
+        train_envs = self.env.spawn(seed=self.train_seed)
+        test_envs = self.env.spawn_test(seed=self.test_seed)
         algorithm_cls = get_algorithm_for_config(self.algorithm)
         algorithm: Algorithm
-        algorithm = algorithm_cls.initialize(self.algorithm, self.env, seed=self.seed)
+        algorithm = algorithm_cls.initialize(self.algorithm, self.env, seed=self.train_seed)
         is_off_policy = isinstance(algorithm, OffPolicyAlgorithm)
 
         buffer_checkpoint = None
@@ -108,8 +109,8 @@ class Experiment:
         checkpoint_metadata = None
         envs_checkpoint = None
 
-        random.seed(self.seed)
-        np.random.seed(self.seed)
+        random.seed(self.train_seed)
+        np.random.seed(self.train_seed)
 
         if self.checkpoint:
             checkpoint_items = (
@@ -169,10 +170,11 @@ class Experiment:
         # Train
         agent = algorithm.train(
             config=self.training_config,
-            envs=envs,
+            train_envs=train_envs,
+            test_envs=test_envs,
             env_config=self.env,
             run_timestamp=self._timestamp,
-            seed=self.seed,
+            seed=self.train_seed,
             track=self._wandb_enabled,
             checkpoint_manager=checkpoint_manager,
             checkpoint_metadata=checkpoint_metadata,

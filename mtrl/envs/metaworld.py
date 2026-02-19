@@ -16,8 +16,9 @@ from metaworld.evaluation import evaluation
 @dataclass(frozen=True)
 class MetaworldConfig(EnvConfig):
     reward_func_version: str = "v2"
-    num_eval_episodes: int = 50
-    num_goals: int = 50
+    num_eval_episodes: int = 10
+    train_num_goals: int = 50
+    test_num_goals: int = 50
     reward_normalization_method: str | None = None
     task_name: str | None = None
 
@@ -146,7 +147,7 @@ class MetaworldConfig(EnvConfig):
                 terminate_on_success=self.terminate_on_success,
                 vector_strategy="async",
                 reward_function_version=self.reward_func_version,
-                num_goals=self.num_goals,
+                num_goals=self.train_num_goals,
                 reward_normalization_method=self.reward_normalization_method,
             )
         elif self.env_id == "MT1":
@@ -160,7 +161,7 @@ class MetaworldConfig(EnvConfig):
                         seed=seed,
                         terminate_on_success=self.terminate_on_success,
                         reward_function_version=self.reward_func_version,
-                        num_goals=self.num_goals,
+                        num_goals=self.train_num_goals,
                         reward_normalization_method=self.reward_normalization_method,
                     )
                 ]
@@ -173,6 +174,74 @@ class MetaworldConfig(EnvConfig):
                 terminate_on_success=self.terminate_on_success,
                 vector_strategy="async",
                 reward_function_version=self.reward_func_version,
-                num_goals=self.num_goals,
+                num_goals=self.train_num_goals,
+                reward_normalization_method=self.reward_normalization_method,
+            )
+
+    def spawn_test(self,  seed: int = 1) -> gym.vector.VectorEnv:
+        if self.env_id == "MT25":
+            envs_list = [
+                "reach-v3",
+                "push-v3",
+                "pick-place-v3",
+                "door-open-v3",
+                "drawer-open-v3",
+                "drawer-close-v3",
+                "button-press-topdown-v3",
+                "peg-insert-side-v3",
+                "window-open-v3",
+                "window-close-v3",
+                "coffee-pull-v3",
+                "pick-out-of-hole-v3",
+                "disassemble-v3",
+                "pick-place-wall-v3",
+                "basketball-v3",
+                "stick-pull-v3",
+                "button-press-wall-v3",
+                "faucet-open-v3",
+                "door-lock-v3",
+                "lever-pull-v3",
+                "sweep-into-v3",
+                "faucet-close-v3",
+                "coffee-button-v3",
+                "button-press-topdown-wall-v3",
+                "dial-turn-v3",
+            ]
+            return gym.make_vec(
+                "Meta-World/custom-mt-envs",
+                seed=seed,
+                envs_list=envs_list,
+                use_one_hot=self.use_one_hot,
+                terminate_on_success=True,
+                vector_strategy="async",
+                reward_function_version=self.reward_func_version,
+                num_goals=self.test_num_goals,
+                reward_normalization_method=self.reward_normalization_method,
+            )
+        elif self.env_id == "MT1":
+            assert self.task_name is not None, "task_name must be specified for MT1"
+            return gym.vector.AsyncVectorEnv(
+                [
+                    lambda: gym.make(
+                        "Meta-World/MT1",
+                        env_name=self.task_name,
+                        use_one_hot=False,
+                        seed=seed,
+                        terminate_on_success=True,
+                        reward_function_version=self.reward_func_version,
+                        num_goals=self.test_num_goals,
+                        reward_normalization_method=self.reward_normalization_method,
+                    )
+                ]
+            )
+        else:
+            return gym.make_vec(
+                f"Meta-World/{self.env_id}",
+                seed=seed,
+                use_one_hot=self.use_one_hot,
+                terminate_on_success=True,
+                vector_strategy="async",
+                reward_function_version=self.reward_func_version,
+                num_goals=self.test_num_goals,
                 reward_normalization_method=self.reward_normalization_method,
             )
