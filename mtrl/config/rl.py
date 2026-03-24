@@ -2,6 +2,12 @@ from dataclasses import dataclass
 
 from .utils import Metrics
 
+from mtrl.config.nn import ImpalaEncoderConfig, TaskEmbeddingConfig
+
+from mtrl.config.networks import (
+    QValueFunctionConfig,
+    VanillaNetworkConfig,
+)
 
 @dataclass(frozen=True)
 class AlgorithmConfig:
@@ -37,6 +43,31 @@ class OffPolicyTrainingConfig(TrainingConfig):
     warmstart_steps: int = int(4e3)
     buffer_size: int = int(1e6)
     batch_size: int = 1280
+
+
+@dataclass(frozen=True)
+class DrQTrainingConfig(OffPolicyTrainingConfig):
+    warmstart_steps: int = 1_600
+    buffer_size: int = 10_000 * 26  # 100k steps per game × 26 games
+    batch_size: int = 32 * 26        # 32 per task × 26 tasks
+
+    encoder_config: ImpalaEncoderConfig = ImpalaEncoderConfig()
+    critic_config: QValueFunctionConfig = QValueFunctionConfig(
+        use_classification=True,
+        num_atoms=51,
+        network_config=VanillaNetworkConfig(width=512, depth=2),
+    )
+    task_embed_config: TaskEmbeddingConfig = TaskEmbeddingConfig()
+    num_critics: int = 2
+    tau: float = 0.005
+    # Epsilon schedule
+    eps_start: float = 1.0
+    eps_end: float = 0.01
+    eps_decay_steps: int = 10_000
+    # Categorical support
+    v_min: float = 0.0
+    v_max: float = 10.0
+    num_tasks:int = 26
 
 @dataclass(frozen=True)
 class OnPolicyTrainingConfig(TrainingConfig):

@@ -4,7 +4,6 @@ from mtrl.config.optim import OptimizerConfig
 
 from .utils import Activation, Initializer
 
-
 @dataclass(frozen=True, kw_only=True)
 class NeuralNetworkConfig:
     width: int = 400
@@ -30,6 +29,7 @@ class NeuralNetworkConfig:
     optimizer: OptimizerConfig = OptimizerConfig()
     """The optimizer to use for the network."""
 
+
 @dataclass(frozen=True, kw_only=True)
 class VanillaNetworkConfig(NeuralNetworkConfig):
     use_skip_connections: bool = False
@@ -37,6 +37,22 @@ class VanillaNetworkConfig(NeuralNetworkConfig):
 
     use_layer_norm: bool = False
     """Whether or not to use layer normalization."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class ImpalaEncoderConfig(NeuralNetworkConfig):
+    use_layer_norm: bool = False
+    scale: int = 1
+    blocks: int = 2
+    stacks: tuple[int, ...] = (8, 16, 16)
+    num_critics: int = 2
+
+@dataclass(frozen=True, kw_only=True)
+class TaskEmbeddingConfig:
+    num_tasks: int = 26
+    """Number of tasks — determines the embedding table size."""
+    embed_dim: int = 64
+    """Dimensionality of each task embedding vector."""
 
 
 @dataclass(frozen=True, kw_only=True)

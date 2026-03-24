@@ -17,6 +17,8 @@ dependencies = [
     "orbax-checkpoint>=0.7.0",
     "tyro>=0.8.11",
     "wandb>=0.18.5",
+    "gymnasium[atari]>=0.29",
+    "ale-py>=0.8",
 ]
 
 [project.optional-dependencies]

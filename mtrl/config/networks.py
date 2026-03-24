@@ -1,4 +1,4 @@
-from .nn import NeuralNetworkConfig, VanillaNetworkConfig
+from .nn import NeuralNetworkConfig, VanillaNetworkConfig, ImpalaEncoderConfig, TaskEmbeddingConfig
 from dataclasses import dataclass
 
 
@@ -25,5 +25,15 @@ class QValueFunctionConfig:
     use_classification: bool = False
     """Whether or not to use classification instead of regression."""
 
+    num_atoms: int | None = None
+    """If using use_classification, describes the number of atoms to use per action dimension."""
+
 @dataclass(frozen=True)
 class ValueFunctionConfig(QValueFunctionConfig): ...
+
+@dataclass(frozen=True)
+class ImpalaDQNConfig: 
+    impala_config: ImpalaEncoderConfig = ImpalaEncoderConfig()
+    q_function_config: QValueFunctionConfig = QValueFunctionConfig(use_classification=True, num_atoms=51)
+    task_embed_config: TaskEmbeddingConfig = TaskEmbeddingConfig()
+

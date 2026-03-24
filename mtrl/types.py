@@ -3,7 +3,7 @@ from typing import NamedTuple, TypedDict, Any, Protocol
 import numpy as np
 import numpy.typing as npt
 
-from jaxtyping import Float, Array
+from jaxtyping import Float, Array, Int
 
 
 Action = Float[np.ndarray, "... action_dim"]
@@ -33,6 +33,15 @@ class ReplayBufferSamples(NamedTuple):
     next_observations: Float[Observation, " batch"]
     dones: Float[np.ndarray, "batch 1"]
     rewards: Float[np.ndarray, "batch 1"]
+
+class AtariReplayBufferSamples(NamedTuple):
+    observations: npt.NDArray[np.uint8]
+    actions: npt.NDArray[np.int32]
+    next_observations: npt.NDArray[np.uint8]
+    truncations: npt.NDArray[np.float32]
+    dones: npt.NDArray[np.float32]
+    rewards: npt.NDArray[np.float32]
+    task_ids: npt.NDArray[np.int32]
 
 
 class Rollout(NamedTuple):

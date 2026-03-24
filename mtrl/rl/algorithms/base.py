@@ -8,6 +8,8 @@ import numpy as np
 import orbax.checkpoint as ocp
 import wandb
 from flax import struct
+import jax.numpy as jnp
+import jax
 
 from metaworld.env_dict import MT10_V3, MT50_V3
 
@@ -139,6 +141,7 @@ class OffPolicyAlgorithm(
             replay_buffer.load_checkpoint(buffer_checkpoint)
 
         start_time = time.time()
+        task_ids = jnp.arange(envs.num_envs)
 
         for global_step in range(start_step, config.total_steps // envs.num_envs):
             total_steps = global_step * envs.num_envs
@@ -146,9 +149,11 @@ class OffPolicyAlgorithm(
             if global_step < config.warmstart_steps:
                 actions = envs.action_space.sample()
             else:
-                self, actions = self.sample_action(obs)
+                self, actions_jax = self.sample_action(obs, task_ids)
+                actions = np.array(jax.device_get(actions_jax))
 
             next_obs, rewards, terminations, truncations, infos = envs.step(actions)
+
             done = np.logical_or(terminations, truncations)
 
             buffer_obs = next_obs
@@ -156,17 +161,17 @@ class OffPolicyAlgorithm(
                 buffer_obs = np.where(
                     done[:, None], np.stack(infos["final_obs"]), next_obs
                 )
-            replay_buffer.add(obs, buffer_obs, actions, rewards, done)
+            replay_buffer.add(obs, buffer_obs, actions, rewards, truncations, done)
 
             obs = next_obs
 
             for i, env_ended in enumerate(done):
                 if env_ended:
                     global_episodic_return.append(
-                        infos["final_info"]["episode"]["r"][i]
+                        infos["episode"]["r"][i]
                     )
                     global_episodic_length.append(
-                        infos["final_info"]["episode"]["l"][i]
+                        infos["episode"]["l"][i]
                     )
                     episodes_ended += 1
 
@@ -190,16 +195,16 @@ class OffPolicyAlgorithm(
             if global_step > config.warmstart_steps:
                 # Update the agent with data
                 data = replay_buffer.sample(config.batch_size)
+                t0 = time.time()
                 self, logs = self.update(data)
-
                 # Logging
-                if global_step % 10000 == 0:
+                if global_step % 1000 == 0:
                     sps_steps = (global_step - start_step) * envs.num_envs
                     sps = int(sps_steps / (time.time() - start_time))
                     print("SPS:", sps)
 
                 # Evaluation
-                if (
+                '''if (
                     config.evaluation_frequency > 0
                     and episodes_ended % config.evaluation_frequency == 0
                     and done.any()
@@ -260,7 +265,7 @@ class OffPolicyAlgorithm(
 
                     # Reset envs again to exit eval mode
                     obs, _ = envs.reset()
-
+                '''
         return self
 
 

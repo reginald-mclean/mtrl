@@ -9,7 +9,9 @@ from .moore import MOORENetwork
 from .multi_head import MultiHeadNetwork
 from .paco import PaCoNetwork
 from .soft_modules import SoftModularizationNetwork
-
+from .impala import ImpalaEncoder
+from .task_embedding import TaskEmbedding
+from mtrl.config.networks import ImpalaDQNConfig
 
 def get_nn_arch_for_config(
     config: mtrl.config.nn.NeuralNetworkConfig,
@@ -28,6 +30,10 @@ def get_nn_arch_for_config(
         return MOORENetwork
     elif type(config) is mtrl.config.nn.VanillaNetworkConfig:
         return VanillaNetwork
+    elif type(config) is mtrl.config.nn.ImpalaEncoderConfig:
+        return ImpalaEncoder
+    elif type(config) is mtrl.config.nn.TaskEmbeddingConfig:
+        return TaskEmbedding
     else:
         raise ValueError(f"Unknown config type: {type(config)}. (NeuralNetworkConfig by itself is not supported, use VanillaNeworkConfig)")
 

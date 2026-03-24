@@ -1,4 +1,4 @@
-from jaxtyping import Float
+from jaxtyping import Float, Int
 
 import gymnasium as gym
 import numpy as np
@@ -10,6 +10,7 @@ from mtrl.types import (
     ReplayBufferCheckpoint,
     ReplayBufferSamples,
     Rollout,
+    AtariReplayBufferSamples
 )
 from scipy.ndimage import gaussian_filter1d
 
@@ -587,3 +588,129 @@ class MultiTaskRolloutBuffer:
             returns,
             advantages,
         )
+
+
+class AtariMultiTaskReplayBuffer(MultiTaskReplayBuffer):
+
+    obs: Float[Observation, "buffer_size task"]
+    actions: Float[Action, "buffer_size task"]
+    rewards: Float[npt.NDArray, "buffer_size task 1"]
+    next_obs: Float[Observation, "buffer_size task"]
+    truncates: Float[npt.NDArray, "buffer_size task 1"]
+    dones: Float[npt.NDArray, "buffer_size task 1"]
+    pos: int
+
+    def __init__(
+        self,
+        total_capacity: int,
+        num_tasks: int,
+        env_obs_space: gym.Space,
+        env_action_space: gym.Space,
+        seed: int | None = None,
+        max_steps: int = 500,
+        reward_filter: str | None = None,
+        sigma: float | None = None,
+        alpha: float | None = None,
+        delta: float | None = None,
+        filter_mode: str | None = None,
+    ) -> None:
+        assert (
+            total_capacity % num_tasks == 0
+        ), "Total capacity must be divisible by the number of tasks."
+        self.capacity = total_capacity // num_tasks
+        self.num_tasks = num_tasks
+        self._rng = np.random.default_rng(seed)
+        self._obs_shape = env_obs_space
+        self._action_shape = 1
+        self.full = False
+
+        self.reset()
+
+    def reset(self):
+        """Reinitialize the buffer."""
+        self.obs = np.zeros(
+            (self.capacity, self.num_tasks, *self._obs_shape.shape), dtype=np.uint8
+        )
+        self.actions = np.zeros(
+            (self.capacity, self.num_tasks), dtype=np.int32
+        )
+        self.rewards = np.zeros((self.capacity, self.num_tasks, 1), dtype=np.float32)
+        self.next_obs = np.zeros((self.capacity, self.num_tasks, *self._obs_shape.shape), dtype=np.uint8)
+        self.dones = np.zeros((self.capacity, self.num_tasks, 1), dtype=np.float32)
+        self.truncations = np.zeros((self.capacity, self.num_tasks, 1), dtype=np.float32)
+        self.pos = 0
+
+    def add(
+        self,
+        obs, # : Int[Observation, " task"],
+        next_obs, # : Int[Observation, " task"],
+        action,  # : Int[Action, " task"],
+        reward, # : Float[npt.NDArray, " task"],
+        truncate, # : Float[npt.NDArray, " task"],
+        done # : Float[npt.NDArray, " task"],
+    ) -> None:
+        # NOTE: assuming batch dim = task dim
+        '''assert (
+            action.ndim == 2 and reward.ndim <= 2 and done.ndim <= 2
+        )'''
+        assert (
+            obs.shape[0]
+            == action.shape[0]
+            == reward.shape[0]
+            == truncate.shape[0]
+            == done.shape[0]
+            == self.num_tasks
+        )
+
+        self.obs[self.pos] = obs.copy()
+        self.actions[self.pos] = action.copy()
+        self.next_obs[self.pos] = next_obs.copy()
+        self.dones[self.pos] = done.copy().reshape(-1, 1)
+        self.rewards[self.pos] = reward.reshape(-1, 1).copy()
+        self.truncations[self.pos] = truncate.copy().reshape(-1, 1)
+
+        self._advance_position(1)
+
+    def sample(
+        self,
+        batch_size: int | np.ndarray,
+    ) -> AtariReplayBufferSamples:
+        """Sample a batch with optional per-task batch size control.
+
+        Args:
+            batch_size: The total batch size. Must be divisible by number of tasks
+                       if per_task_batch_sizes is None.
+            per_task_batch_sizes: Optional array of shape [num_tasks] specifying
+                                 how many samples to draw from each task.
+                                 If provided, must sum to batch_size.
+
+        Returns:
+            AtariReplayBufferSamples: A batch of samples of batch shape (batch_size,).
+        """
+
+        assert batch_size % self.num_tasks == 0, \
+                "Batch size must be divisible by the number of tasks."
+        single_task_batch_size = batch_size // self.num_tasks
+        sample_idx = self._rng.integers(
+            low=0,
+            high=max(
+            self.pos if not self.full else self.capacity, single_task_batch_size
+            ),
+            size=(single_task_batch_size,),
+        )
+
+        task_ids = np.repeat(np.arange(self.num_tasks), single_task_batch_size) 
+
+        batch = (
+            self.obs[sample_idx],
+            self.actions[sample_idx],
+            self.next_obs[sample_idx],
+            self.truncations[sample_idx],
+            self.dones[sample_idx],
+            self.rewards[sample_idx],
+            task_ids,
+        )
+        mt_batch_size = single_task_batch_size * self.num_tasks
+        batch = map(lambda x: x.reshape(mt_batch_size, *x.shape[2:]), batch)
+
+        return AtariReplayBufferSamples(*batch)
