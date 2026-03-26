@@ -17,7 +17,7 @@ from flax.core import FrozenDict
 from flax.training.train_state import TrainState
 from jaxtyping import Array, Float, PRNGKeyArray
 
-from mtrl.config.networks import ContinuousActionPolicyConfig, QValueFunctionConfig
+from mtrl.config.networks import ContinuousActionPolicyConfig, QValueFunctionConfig, UVFA_QFunctionConfig
 from mtrl.config.optim import OptimizerConfig
 from mtrl.config.rl import AlgorithmConfig, OffPolicyTrainingConfig
 from mtrl.config.utils import Metrics
@@ -28,7 +28,7 @@ from mtrl.monitoring.metrics import (
     get_dormant_neuron_logs,
 )
 from mtrl.rl.buffers import ReplayBuffer
-from mtrl.rl.networks import ContinuousActionPolicy, Ensemble, QValueFunction
+from mtrl.rl.networks import ContinuousActionPolicy, Ensemble, QValueFunction, UVFA_QValueFunction
 from mtrl.types import (
     Action,
     Intermediates,
@@ -94,6 +94,8 @@ class SAC(OffPolicyAlgorithm[SACConfig]):
     tau: float = struct.field(pytree_node=False)
     target_entropy: float = struct.field(pytree_node=False)
     num_critics: int = struct.field(pytree_node=False)
+    sac_type: str = struct.field(pytree_node=False)
+
 
     def spawn_replay_buffer(  # pyright: ignore[reportIncompatibleMethodOverride]
         self, env_config: EnvConfig, config: OffPolicyTrainingConfig, seed: int = 1
@@ -135,12 +137,22 @@ class SAC(OffPolicyAlgorithm[SACConfig]):
         print("Actor Arch:", jax.tree_util.tree_map(jnp.shape, actor.params))
         print("Actor Params:", sum(x.size for x in jax.tree.leaves(actor.params)))
 
-        critic_cls = partial(QValueFunction, config=config.critic_config)
+        if type(config.critic_config) is not UVFA_QFunctionConfig:
+            critic_cls = partial(QValueFunction, config=config.critic_config)
+        else:
+            critic_cls = partial(UVFA_QValueFunction, config=config.critic_config)
+
         critic_net = Ensemble(critic_cls, num=config.num_critics)
         dummy_action = jnp.array(
             [env_config.action_space.sample() for _ in range(config.num_tasks)]
         )
-        critic_init_params = critic_net.init(critic_init_key, dummy_obs, dummy_action)
+
+        if type(config.critic_config) is UVFA_QFunctionConfig:
+            dummy_goals = dummy_obs[:, -3:]
+            critic_init_params = critic_net.init(critic_init_key, dummy_obs[:, :-3], dummy_action, dummy_goals)
+        else:
+            critic_init_params = critic_net.init(critic_init_key, dummy_obs, dummy_action)
+
         critic = CriticTrainState.create(
             apply_fn=critic_net.apply,
             params=critic_init_params,
@@ -170,6 +182,7 @@ class SAC(OffPolicyAlgorithm[SACConfig]):
             tau=config.tau,
             target_entropy=target_entropy,
             num_critics=config.num_critics,
+            sac_type='base' if type(config.critic_config) is not UVFA_QFunctionConfig else 'uvfa'
         )
 
     def reset(self, env_mask) -> None:
@@ -207,10 +220,15 @@ class SAC(OffPolicyAlgorithm[SACConfig]):
                 self.actor.params, data.next_observations
             ).sample_and_log_prob(seed=critic_loss_key)
             # Compute target Q values
-            q_values = self.critic.apply_fn(
-                self.critic.target_params, data.next_observations, next_actions
-            )
 
+            if self.sac_type == 'base':
+                q_values = self.critic.apply_fn(
+                    self.critic.target_params, data.next_observations, next_actions
+                )
+            else:
+                q_values = self.critic.apply_fn(
+                    self.critic.target_params, data.next_observations[:, :-3], next_actions, data.next_observations[:, -3:]
+                )
             def critic_loss(
                 params: FrozenDict,
             ) -> tuple[Float[Array, ""], Float[Array, ""]]:
@@ -221,8 +239,14 @@ class SAC(OffPolicyAlgorithm[SACConfig]):
                 next_q_value = jax.lax.stop_gradient(
                     data.rewards + (1 - data.dones) * self.gamma * min_qf_next_target
                 )
+                if self.sac_type == 'base':
+                    q_pred = self.critic.apply_fn(params, data.observations, data.actions)
+                else:
+                    q_pred = self.critic.apply_fn(params, data.observations[:, :-3], data.actions, data.observations[:, -3:])
 
-                q_pred = self.critic.apply_fn(params, data.observations, data.actions)
+                next_q_value = jnp.clip(next_q_value, -5000, 5000)
+                q_pred = jnp.clip(q_pred, -5000, 5000)
+
                 loss = 0.5 * ((q_pred - next_q_value) ** 2).mean(axis=1).sum()
                 return loss, q_pred.mean()
 
@@ -276,10 +300,14 @@ class SAC(OffPolicyAlgorithm[SACConfig]):
             _alpha_val = jax.lax.stop_gradient(_alpha_val)
             _critic, critic_logs = update_critic(self.critic, _alpha_val)
             logs = {**alpha_logs, **critic_logs}
-
-            q_values = _critic.apply_fn(
-                _critic.params, data.observations, action_samples
-            )
+            if self.sac_type == 'base':
+                q_values = _critic.apply_fn(
+                    _critic.params, data.observations, action_samples
+                )
+            else:
+                q_values = _critic.apply_fn(
+                    _critic.params, data.observations[:, :-3], action_samples, data.observations[:,-3:]
+                )
             min_qf_values = jnp.min(q_values, axis=0)
             loss = (_alpha_val * log_probs.reshape(-1, 1) - min_qf_values).mean()
             return loss, (_alpha, _critic, logs)
@@ -341,9 +369,15 @@ class SAC(OffPolicyAlgorithm[SACConfig]):
         )
         actions = actions_dist.sample(seed=critic_activations_key)
 
-        _, critic_state = self.critic.apply_fn(
-            self.critic.params, data.observations, actions, mutable="intermediates"
-        )
+        if self.sac_type == 'base':
+            _, critic_state = self.critic.apply_fn(
+                self.critic.params, data.observations, actions, mutable="intermediates"
+            )
+        else:
+            _, critic_state = self.critic.apply_fn(
+                self.critic.params, data.observations[:,:-3], actions, data.observations[:,-3:], mutable="intermediates"
+            )
+
 
         actor_intermediates = jax.tree.map(
             lambda x: x.reshape(batch_size, -1), actor_state["intermediates"]

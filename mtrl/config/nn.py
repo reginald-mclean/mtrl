@@ -38,6 +38,9 @@ class VanillaNetworkConfig(NeuralNetworkConfig):
     use_layer_norm: bool = False
     """Whether or not to use layer normalization."""
 
+@dataclass(frozen=True, kw_only=True)
+class UVFA_VanillaNetworkConfig(NeuralNetworkConfig): ...
+
 
 @dataclass(frozen=True, kw_only=True)
 class MultiHeadConfig(NeuralNetworkConfig):

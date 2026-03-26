@@ -3,8 +3,8 @@ from pathlib import Path
 
 import tyro
 
-from mtrl.config.networks import ContinuousActionPolicyConfig, QValueFunctionConfig
-from mtrl.config.nn import VanillaNetworkConfig
+from mtrl.config.networks import ContinuousActionPolicyConfig, UVFA_QFunctionConfig
+from mtrl.config.nn import UVFA_VanillaNetworkConfig, VanillaNetworkConfig
 from mtrl.config.optim import OptimizerConfig
 from mtrl.config.rl import OffPolicyTrainingConfig
 from mtrl.envs import MetaworldConfig
@@ -47,18 +47,17 @@ def main() -> None:
                     optimizer=OptimizerConfig(max_grad_norm=1.0)
                 )
             ),
-            critic_config=QValueFunctionConfig(
-                network_config=VanillaNetworkConfig(
-                    width=400,
+            critic_config=UVFA_QFunctionConfig(
+                network_config=UVFA_VanillaNetworkConfig(
                     optimizer=OptimizerConfig(max_grad_norm=1.0)
                 )
             ),
             num_critics=2,
         ),
         training_config=OffPolicyTrainingConfig(
-            evaluation_frequency=200,
-            total_steps=int(5_000_000),
-            buffer_size=int(1_000_000),
+            evaluation_frequency=2000,
+            total_steps=int(2_000_000),
+            buffer_size=int(100_000),
             batch_size=128,
         ),
         checkpoint=False,

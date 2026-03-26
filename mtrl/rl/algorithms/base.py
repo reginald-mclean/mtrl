@@ -227,12 +227,12 @@ class OffPolicyAlgorithm(
                         if track:
                             wandb.log(eval_metrics, step=total_steps)
 
-                    self, network_metrics = self.get_metrics(
-                        config.compute_network_metrics, data
-                    )
+                    #self, network_metrics = self.get_metrics(
+                    #    config.compute_network_metrics, data
+                    #)
 
-                    if track:
-                        wandb.log(network_metrics, step=total_steps)
+                    #if track:
+                    #    wandb.log(network_metrics, step=total_steps)
 
                     if hasattr(self, "compute_weights"):
                         self, update_logs = self.compute_weights(data)

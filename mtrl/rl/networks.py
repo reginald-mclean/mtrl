@@ -86,6 +86,29 @@ class ValueFunction(nn.Module):
                 "Value prediction as classification is not supported yet."
             )
 
+class UVFA_QValueFunction(nn.Module):
+    """A Flax module approximating a Q-Value function."""
+
+    config: QValueFunctionConfig
+
+    @nn.compact
+    def __call__(self, state: jax.Array, action: jax.Array, goal: jax.Array) -> jax.Array:
+        # NOTE: certain NN architectures that make use of task IDs will be looking for them
+        # at the last N_TASKS dimensions of their input. So while normally concat(state,action) makes more sense
+        # we'll go with (action, state) here
+        #x = jnp.concatenate((action, state), axis=-1)
+
+        if not self.config.use_classification:
+            return get_nn_arch_for_config(self.config.network_config)(
+                config=self.config.network_config,
+                head_kernel_init=uniform(3e-3),
+                head_bias_init=uniform(3e-3),
+            )(state, action, goal)
+        else:
+            raise NotImplementedError(
+                "Value prediction as classification is not supported yet."
+            )
+
 
 class Ensemble(nn.Module):
     net_cls: nn.Module | Callable[..., nn.Module]

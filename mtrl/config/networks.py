@@ -1,4 +1,4 @@
-from .nn import NeuralNetworkConfig, VanillaNetworkConfig
+from .nn import NeuralNetworkConfig, VanillaNetworkConfig, UVFA_VanillaNetworkConfig
 from dataclasses import dataclass
 
 
@@ -27,3 +27,7 @@ class QValueFunctionConfig:
 
 @dataclass(frozen=True)
 class ValueFunctionConfig(QValueFunctionConfig): ...
+
+@dataclass(frozen=True)
+class UVFA_QFunctionConfig(QValueFunctionConfig):
+    network_config = UVFA_VanillaNetworkConfig()

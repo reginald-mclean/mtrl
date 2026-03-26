@@ -2,7 +2,7 @@ import flax.linen as nn
 
 import mtrl.config.nn
 
-from .base import VanillaNetwork
+from .base import VanillaNetwork, UVFA_QFunction
 from .care import CARENetwork
 from .film import FiLMNetwork
 from .moore import MOORENetwork
@@ -28,6 +28,8 @@ def get_nn_arch_for_config(
         return MOORENetwork
     elif type(config) is mtrl.config.nn.VanillaNetworkConfig:
         return VanillaNetwork
+    elif type(config) is mtrl.config.nn.UVFA_VanillaNetworkConfig:
+        return UVFA_QFunction
     else:
         raise ValueError(f"Unknown config type: {type(config)}. (NeuralNetworkConfig by itself is not supported, use VanillaNeworkConfig)")
 

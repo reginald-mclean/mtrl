@@ -16,7 +16,7 @@ from metaworld.evaluation import evaluation
 @dataclass(frozen=True)
 class MetaworldConfig(EnvConfig):
     reward_func_version: str = "v2"
-    num_eval_episodes: int = 10
+    num_eval_episodes: int = 50
     train_num_goals: int = 50
     test_num_goals: int = 50
     reward_normalization_method: str | None = None
@@ -163,6 +163,7 @@ class MetaworldConfig(EnvConfig):
                         reward_function_version=self.reward_func_version,
                         num_goals=self.train_num_goals,
                         reward_normalization_method=self.reward_normalization_method,
+                        task_select='pseudorandom'
                     )
                 ]
             )
@@ -231,6 +232,7 @@ class MetaworldConfig(EnvConfig):
                         reward_function_version=self.reward_func_version,
                         num_goals=self.test_num_goals,
                         reward_normalization_method=self.reward_normalization_method,
+                        task_select='pseudorandom',
                     )
                 ]
             )
