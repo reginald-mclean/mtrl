@@ -1,3 +1,5 @@
+from collections import deque
+
 from jaxtyping import Float, Int
 
 import gymnasium as gym
@@ -613,7 +615,12 @@ class AtariMultiTaskReplayBuffer(MultiTaskReplayBuffer):
         alpha: float | None = None,
         delta: float | None = None,
         filter_mode: str | None = None,
+        normalize_rewards: bool = False,
+        reward_norm_eps: float = 1e-8,
+        nstep: int = 3,
+        gamma: float = 0.99,
     ) -> None:
+        print(total_capacity%num_tasks)
         assert (
             total_capacity % num_tasks == 0
         ), "Total capacity must be divisible by the number of tasks."
@@ -623,6 +630,16 @@ class AtariMultiTaskReplayBuffer(MultiTaskReplayBuffer):
         self._obs_shape = env_obs_space
         self._action_shape = 1
         self.full = False
+        self.normalize_rewards = normalize_rewards
+        self.reward_norm_eps = reward_norm_eps
+        self.nstep = nstep
+        self.gamma = gamma
+
+        self._nstep_buffer: deque = deque(maxlen=nstep)
+
+        # Per-task min-max reward normalization
+        self._min_rewards = np.full(num_tasks, np.inf, dtype=np.float64)
+        self._max_rewards = np.full(num_tasks, -np.inf, dtype=np.float64)
 
         self.reset()
 
@@ -640,19 +657,42 @@ class AtariMultiTaskReplayBuffer(MultiTaskReplayBuffer):
         self.truncations = np.zeros((self.capacity, self.num_tasks, 1), dtype=np.float32)
         self.pos = 0
 
+    def _get_nstep_info(self):
+        """Compute n-step return from the current nstep_buffer (all tasks vectorized).
+
+        Returns obs and action from the oldest transition, accumulated discounted
+        reward, and the terminal next_obs/done for each task.
+        """
+        obs_0, next_obs_0, action_0, reward_0, truncate_0, done_0 = self._nstep_buffer[0]
+
+        # Start from the last transition
+        _, next_obs, _, reward, truncate, done = self._nstep_buffer[-1]
+        reward = reward.copy().reshape(-1)
+        next_obs = next_obs.copy()
+        done = done.copy().reshape(-1)
+
+        # Accumulate backwards through the window (excluding the last entry)
+        for _, next_obs_i, _, rew_i, _, done_i in reversed(list(self._nstep_buffer)[:-1]):
+            rew_i = rew_i.reshape(-1)
+            done_i = done_i.reshape(-1)
+            reward = rew_i + self.gamma * reward * (1 - done_i)
+            # Where this step ended an episode, use its terminal next_obs/done
+            mask = done_i.astype(bool)
+            if mask.any():
+                next_obs = np.where(mask[:, np.newaxis, np.newaxis, np.newaxis], next_obs_i, next_obs)
+                done = np.where(mask, done_i, done)
+
+        return obs_0, next_obs, action_0, reward, truncate_0.reshape(-1), done
+
     def add(
         self,
-        obs, # : Int[Observation, " task"],
-        next_obs, # : Int[Observation, " task"],
-        action,  # : Int[Action, " task"],
-        reward, # : Float[npt.NDArray, " task"],
-        truncate, # : Float[npt.NDArray, " task"],
-        done # : Float[npt.NDArray, " task"],
+        obs,
+        next_obs,
+        action,
+        reward,
+        truncate,
+        done,
     ) -> None:
-        # NOTE: assuming batch dim = task dim
-        '''assert (
-            action.ndim == 2 and reward.ndim <= 2 and done.ndim <= 2
-        )'''
         assert (
             obs.shape[0]
             == action.shape[0]
@@ -662,12 +702,30 @@ class AtariMultiTaskReplayBuffer(MultiTaskReplayBuffer):
             == self.num_tasks
         )
 
-        self.obs[self.pos] = obs.copy()
-        self.actions[self.pos] = action.copy()
-        self.next_obs[self.pos] = next_obs.copy()
-        self.dones[self.pos] = done.copy().reshape(-1, 1)
-        self.rewards[self.pos] = reward.reshape(-1, 1).copy()
-        self.truncations[self.pos] = truncate.copy().reshape(-1, 1)
+        self._nstep_buffer.append((
+            obs.copy(),
+            next_obs.copy(),
+            action.copy(),
+            reward.reshape(-1).copy(),
+            truncate.reshape(-1).copy(),
+            done.reshape(-1).copy(),
+        ))
+
+        if len(self._nstep_buffer) < self.nstep:
+            return
+
+        n_obs, n_next_obs, n_action, n_reward, n_truncate, n_done = self._get_nstep_info()
+
+        self.obs[self.pos] = n_obs
+        self.actions[self.pos] = n_action
+        self.next_obs[self.pos] = n_next_obs
+        self.dones[self.pos] = n_done.reshape(-1, 1)
+        self.rewards[self.pos] = n_reward.reshape(-1, 1)
+        self.truncations[self.pos] = n_truncate.reshape(-1, 1)
+
+        if self.normalize_rewards:
+            self._min_rewards = np.minimum(self._min_rewards, n_reward)
+            self._max_rewards = np.maximum(self._max_rewards, n_reward)
 
         self._advance_position(1)
 
@@ -675,14 +733,10 @@ class AtariMultiTaskReplayBuffer(MultiTaskReplayBuffer):
         self,
         batch_size: int | np.ndarray,
     ) -> AtariReplayBufferSamples:
-        """Sample a batch with optional per-task batch size control.
+        """Sample a balanced batch (equal samples per task).
 
         Args:
-            batch_size: The total batch size. Must be divisible by number of tasks
-                       if per_task_batch_sizes is None.
-            per_task_batch_sizes: Optional array of shape [num_tasks] specifying
-                                 how many samples to draw from each task.
-                                 If provided, must sum to batch_size.
+            batch_size: The total batch size. Must be divisible by number of tasks.
 
         Returns:
             AtariReplayBufferSamples: A batch of samples of batch shape (batch_size,).
@@ -699,7 +753,14 @@ class AtariMultiTaskReplayBuffer(MultiTaskReplayBuffer):
             size=(single_task_batch_size,),
         )
 
-        task_ids = np.repeat(np.arange(self.num_tasks), single_task_batch_size) 
+        task_ids = np.repeat(np.arange(self.num_tasks), single_task_batch_size)
+
+        rewards = self.rewards[sample_idx]
+        if self.normalize_rewards:
+            # Per-task min-max normalization (shape: [sample, task, 1])
+            mn = self._min_rewards[np.newaxis, :, np.newaxis]
+            mx = self._max_rewards[np.newaxis, :, np.newaxis]
+            rewards = (rewards - mn) / (mx - mn + self.reward_norm_eps)
 
         batch = (
             self.obs[sample_idx],
@@ -707,10 +768,63 @@ class AtariMultiTaskReplayBuffer(MultiTaskReplayBuffer):
             self.next_obs[sample_idx],
             self.truncations[sample_idx],
             self.dones[sample_idx],
-            self.rewards[sample_idx],
+            rewards,
             task_ids,
         )
         mt_batch_size = single_task_batch_size * self.num_tasks
         batch = map(lambda x: x.reshape(mt_batch_size, *x.shape[2:]), batch)
 
         return AtariReplayBufferSamples(*batch)
+
+    def sample_unbalanced(
+        self,
+        batch_size: int,
+    ) -> AtariReplayBufferSamples:
+        """Sample with Dirichlet-weighted unbalanced task proportions.
+
+        Uses np.random.dirichlet to vary per-task batch sizes, matching the
+        Archive reference implementation.
+        """
+        buffer_size = self.pos if not self.full else self.capacity
+        weights = self._rng.dirichlet([1] * self.num_tasks)
+        task_sizes = np.floor(weights * batch_size).astype(np.int32)
+        # Distribute remainder to ensure total is exactly batch_size
+        remainder = batch_size - task_sizes.sum()
+        if remainder > 0:
+            top_indices = np.argsort(-weights)[:remainder]
+            task_sizes[top_indices] += 1
+
+        all_obs = []
+        all_actions = []
+        all_next_obs = []
+        all_truncations = []
+        all_dones = []
+        all_rewards = []
+        all_task_ids = []
+
+        for i in range(self.num_tasks):
+            n = task_sizes[i]
+            if n > 0:
+                idx = self._rng.integers(0, buffer_size, size=(n,))
+                all_obs.append(self.obs[idx, i])
+                all_actions.append(self.actions[idx, i])
+                all_next_obs.append(self.next_obs[idx, i])
+                all_truncations.append(self.truncations[idx, i])
+                all_dones.append(self.dones[idx, i])
+                r = self.rewards[idx, i]
+                if self.normalize_rewards:
+                    mn = self._min_rewards[i]
+                    mx = self._max_rewards[i]
+                    r = (r - mn) / (mx - mn + self.reward_norm_eps)
+                all_rewards.append(r)
+                all_task_ids.append(np.full(n, i, dtype=np.int32))
+
+        return AtariReplayBufferSamples(
+            np.concatenate(all_obs).astype(np.uint8),
+            np.concatenate(all_actions).astype(np.int32),
+            np.concatenate(all_next_obs).astype(np.uint8),
+            np.concatenate(all_truncations).astype(np.float32),
+            np.concatenate(all_dones).astype(np.float32),
+            np.concatenate(all_rewards).astype(np.float32),
+            np.concatenate(all_task_ids).astype(np.int32),
+        )

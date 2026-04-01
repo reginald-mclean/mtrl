@@ -45,13 +45,13 @@ class ImpalaEncoderConfig(NeuralNetworkConfig):
     scale: int = 1
     blocks: int = 2
     stacks: tuple[int, ...] = (8, 16, 16)
-    num_critics: int = 2
+    num_critics: int = 1
 
 @dataclass(frozen=True, kw_only=True)
 class TaskEmbeddingConfig:
     num_tasks: int = 26
     """Number of tasks — determines the embedding table size."""
-    embed_dim: int = 64
+    embed_dim: int = 32
     """Dimensionality of each task embedding vector."""
 
 

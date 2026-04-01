@@ -16,6 +16,8 @@ class OptimizerConfig:
     lr: float = 3e-4
     optimizer: Optimizer = Optimizer.Adam
     max_grad_norm: float | None = None
+    eps: float | None = None
+    weight_decay: float | None = None
 
     @property
     def requires_split_task_losses(self) -> bool:
@@ -24,8 +26,13 @@ class OptimizerConfig:
     def spawn(self) -> optax.GradientTransformation:
         # From https://github.com/araffin/sbx/blob/master/sbx/ppo/policies.py#L120
         optim_kwargs = {}
-        if self.optimizer == Optimizer.Adam:
+        if self.eps is not None:
+            optim_kwargs["eps"] = self.eps
+        elif self.optimizer == Optimizer.Adam:
             optim_kwargs["eps"] = 1e-5
+
+        if self.weight_decay is not None and self.optimizer == Optimizer.AdamW:
+            optim_kwargs["weight_decay"] = self.weight_decay
 
         optim = self.optimizer(learning_rate=self.lr, **optim_kwargs)
         if self.max_grad_norm is not None:

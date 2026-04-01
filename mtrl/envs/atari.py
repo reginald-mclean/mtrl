@@ -137,23 +137,24 @@ def make_atari_env(
 def evaluation(
     agent: Agent,
     eval_envs: gym.vector.SyncVectorEnv | gym.vector.AsyncVectorEnv,
-    num_episodes: int = 50,
-) -> tuple[float, float, dict[str, float], dict[str, list[float]]]:
+    num_episodes: int = 5,
+) -> tuple[float, dict[str, float]]:
     obs: npt.NDArray[np.float64]
     obs, _ = eval_envs.reset()
     agent.reset(np.ones(eval_envs.num_envs, dtype=np.bool_))
 
     task_names = ATARI_26_GAMES
-    successes = {task_name: 0 for task_name in set(task_names)}
     episodic_returns: dict[str, list[float]] = {
-        task_name: [] for task_name in set(task_names)
+        task_name: [] for task_name in task_names
     }
 
     def eval_done(returns):
-        return all(len(r) >= num_episodes for _, r in returns.items())
+        return all(len(r) >= num_episodes for r in returns.values())
+
+    task_ids = np.arange(eval_envs.num_envs)
 
     while not eval_done(episodic_returns):
-        actions = agent.eval_action(obs)
+        actions = agent.eval_action(obs, task_ids)
         obs, _, terminations, truncations, infos = eval_envs.step(actions)
 
         dones = np.logical_or(terminations, truncations)
@@ -162,27 +163,25 @@ def evaluation(
         for i, env_ended in enumerate(dones):
             if env_ended:
                 episodic_returns[task_names[i]].append(
-                    float(infos["final_info"][i]["episode"]["r"])
+                    float(infos["episode"]["r"][i])
                 )
 
-    episodic_returns = {
-        task_name: returns[:num_episodes]
+    human_scores = get_human_scores()
+    random_scores = get_random_scores()
+
+    mean_return_per_task = {
+        task_name: float(np.mean(returns[:num_episodes]))
         for task_name, returns in episodic_returns.items()
     }
+    mean_returns = float(np.mean(list(mean_return_per_task.values())))
 
-    success_rate_per_task = {
-        task_name: task_successes / num_episodes
-        for task_name, task_successes in successes.items()
+    hns_per_task = {
+        task_name: (mean_return - random_scores[task_name]) / (human_scores[task_name] - random_scores[task_name])
+        for task_name, mean_return in mean_return_per_task.items()
     }
-    mean_success_rate = np.mean(list(success_rate_per_task.values()))
-    mean_returns = np.mean(list(episodic_returns.values()))
+    mean_hns = float(np.median(list(hns_per_task.values())))
 
-    return (
-        float(mean_success_rate),
-        float(mean_returns),
-        success_rate_per_task,
-        episodic_returns,
-    )
+    return mean_returns, mean_hns, mean_return_per_task, hns_per_task
 
 
 def get_human_scores() -> dict[str, float]:
@@ -224,7 +223,7 @@ def get_random_scores() -> dict[str, float]:
 @dataclass(frozen=True)
 class AtariConfig(EnvConfig):
     seed: int = 1
-    eval_episodes: int = 3
+    eval_episodes: int = 5
     env_id: str = "Atari26"
     frame_stack: int = 4
 
@@ -244,5 +243,6 @@ class AtariConfig(EnvConfig):
 
     def evaluate(
         self, envs: gym.vector.VectorEnv, agent: Agent
-    ) -> tuple[float, float, dict[str, float]]: 
-        return evaluation(agent, envs)[:3]
+    ) -> tuple[float, float, dict[str, float]]:
+        mean_returns, mean_hns, mean_return_per_task, hns_per_task = evaluation(agent, envs, num_episodes=self.eval_episodes)
+        return mean_hns, mean_returns, hns_per_task

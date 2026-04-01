@@ -4,7 +4,6 @@ import dataclasses
 from functools import partial
 from typing import Self, override
 
-import distrax
 import flax.linen as nn
 import gymnasium as gym
 import jax
@@ -29,7 +28,7 @@ from mtrl.monitoring.metrics import (
     get_dormant_neuron_logs,
 )
 from mtrl.rl.buffers import AtariMultiTaskReplayBuffer
-from mtrl.rl.networks import ContinuousActionPolicy, Ensemble, QValueFunction, ImpalaDQN
+from mtrl.rl.networks import ImpalaDQN
 from mtrl.types import (
     Action,
     Intermediates,
@@ -39,7 +38,10 @@ from mtrl.types import (
     AtariReplayBufferSamples,
 )
 
+from mtrl.nn.augmentation import augment
+
 from .base import OffPolicyAlgorithm
+from .utils import compute_conflict_metrics, vmap_cos_sim
 
 class CriticTrainState(TrainState):
     target_params: FrozenDict | None = None
@@ -59,8 +61,8 @@ def _sample_action(
     eps_decay_steps: int,
 ) -> tuple[jnp.ndarray, PRNGKeyArray]:
     key, sample_key, random_key = jax.random.split(key, 3)
-    logits = critic.apply_fn(critic.params, observation, task_ids)    
-    logits = jnp.mean(logits, axis=0)
+    logits = critic.apply_fn(critic.params, observation, task_ids)
+    # logits = critic.apply_fn(critic.target_params, observation, task_ids)
     exp_q_vals = jax.nn.softmax(logits, axis=-1)
     support = jnp.linspace(v_min, v_max, n_atoms)
     q_values = jnp.sum(exp_q_vals * support, axis=-1)
@@ -82,7 +84,6 @@ def _eval_action(
     n_atoms: int,
 ) -> jnp.ndarray:
     logits = critic.apply_fn(critic.params, observation, task_ids)
-    logits = jnp.mean(logits, axis=0)
     support = jnp.linspace(v_min, v_max, n_atoms)
     q_values = jnp.sum(jax.nn.softmax(logits, axis=-1) * support, axis=-1)
     return jnp.argmax(q_values, axis=-1)
@@ -92,13 +93,12 @@ def _eval_action(
 class DrQConfig(AlgorithmConfig):
     critic_config: ImpalaDQNConfig = ImpalaDQNConfig()
     tau: float = 0.005
-    num_critics: int = 2
-    v_min: float = 0.0
+    v_min: float = -10.0
     v_max: float = 10.0
     n_atoms: int = 51
     eps_start: float = 1.0
     eps_end: float = 0.01
-    eps_decay_steps: int = 10_000
+    eps_decay_steps: int = 5_000
     num_tasks: int = 26
 
 
@@ -108,7 +108,7 @@ class DrQ(OffPolicyAlgorithm[DrQConfig]):
     step: jnp.ndarray
     gamma: float = struct.field(pytree_node=False)
     tau: float = struct.field(pytree_node=False)
-    num_critics: int = struct.field(pytree_node=False)
+    nstep: int = struct.field(pytree_node=False)
     v_min: float = struct.field(pytree_node=False)
     v_max: float = struct.field(pytree_node=False)
     n_atoms: int = struct.field(pytree_node=False)
@@ -126,6 +126,9 @@ class DrQ(OffPolicyAlgorithm[DrQConfig]):
             env_obs_space=env_config.observation_space,
             env_action_space=env_config.action_space,
             seed=seed,
+            normalize_rewards=config.normalize_rewards,
+            nstep=config.nstep,
+            gamma=self.gamma,
         )
 
     @override
@@ -139,8 +142,8 @@ class DrQ(OffPolicyAlgorithm[DrQConfig]):
         )
 
         master_key = jax.random.PRNGKey(seed)
-        algorithm_key, critic_init_key = (
-            jax.random.split(master_key, 2)
+        algorithm_key, critic_init_key, shrink_key = (
+            jax.random.split(master_key, 3)
         )
 
         dummy_obs = jnp.array(
@@ -151,10 +154,11 @@ class DrQ(OffPolicyAlgorithm[DrQConfig]):
         task_ids = jnp.arange(config.num_tasks)
 
         critic_net = ImpalaDQN(
-            impala_config=config.critic_config.impala_config, 
+            impala_config=config.critic_config.impala_config,
             q_function_config=config.critic_config.q_function_config,
             task_embed_config=config.critic_config.task_embed_config,
-            action_dim=env_config.action_space.n
+            action_dim=env_config.action_space.n,
+            use_layer_norm=config.critic_config.use_layer_norm,
         )
 
         critic_init_params = critic_net.init(critic_init_key, dummy_obs, task_ids)
@@ -164,6 +168,24 @@ class DrQ(OffPolicyAlgorithm[DrQConfig]):
             target_params=critic_init_params,
             tx=config.critic_config.q_function_config.network_config.optimizer.spawn(),
         )
+
+        # Shrink-and-perturb initialization (matches Archive)
+        fresh_params = critic_net.init(shrink_key, dummy_obs, task_ids)
+        shrink_rate = 0.5
+
+        def interpolate(old_param, new_param):
+            return old_param * (1 - shrink_rate) + new_param * shrink_rate
+
+        combined_inner = {}
+        for key in critic_init_params['params']:
+            if 'ImpalaEncoder' in key:
+                combined_inner[key] = jax.tree_util.tree_map(
+                    interpolate, critic_init_params['params'][key], fresh_params['params'][key]
+                )
+            else:
+                combined_inner[key] = fresh_params['params'][key]
+        combined_params = {'params': combined_inner}
+        critic = critic.replace(params=combined_params, target_params=combined_params)
 
         print("Critic Arch:", jax.tree_util.tree_map(jnp.shape, critic.params))
         print("Critic Params:", sum(x.size for x in jax.tree.leaves(critic.params)))
@@ -175,7 +197,7 @@ class DrQ(OffPolicyAlgorithm[DrQConfig]):
             step=jnp.zeros((), dtype=jnp.int32),
             gamma=config.gamma,
             tau=config.tau,
-            num_critics=config.num_critics,
+            nstep=config.nstep if hasattr(config, 'nstep') else 3,
             v_min=config.v_min,
             v_max=config.v_max,
             n_atoms=config.n_atoms,
@@ -183,6 +205,41 @@ class DrQ(OffPolicyAlgorithm[DrQConfig]):
             eps_end=config.eps_end,
             eps_decay_steps=config.eps_decay_steps,
         )
+    def shrink_and_perturb(self, dummy_obs: jnp.ndarray, critic_config: ImpalaDQNConfig, action_dim: int, shrink_rate: float = 0.5) -> "DrQ":
+        key, shrink_key = jax.random.split(self.key)
+        task_ids = jnp.arange(self.num_tasks)
+
+        critic_net = ImpalaDQN(
+            impala_config=critic_config.impala_config,
+            q_function_config=critic_config.q_function_config,
+            task_embed_config=critic_config.task_embed_config,
+            action_dim=action_dim,
+            use_layer_norm=critic_config.use_layer_norm,
+        )
+        fresh_params = critic_net.init(shrink_key, dummy_obs, task_ids)
+
+        def interpolate(old_param, new_param):
+            return old_param * (1 - shrink_rate) + new_param * shrink_rate
+
+        combined_inner = {}
+        for param_key in self.critic.params['params']:
+            if 'ImpalaEncoder' in param_key:
+                combined_inner[param_key] = jax.tree_util.tree_map(
+                    interpolate, self.critic.params['params'][param_key], fresh_params['params'][param_key]
+                )
+            else:
+                combined_inner[param_key] = fresh_params['params'][param_key]
+        combined_params = {'params': combined_inner}
+
+        critic = CriticTrainState.create(
+            apply_fn=self.critic.apply_fn,
+            params=combined_params,
+            target_params=optax.incremental_update(combined_params, self.critic.target_params, 1),
+            tx=critic_config.q_function_config.network_config.optimizer.spawn(),
+        )
+
+        return self.replace(critic=critic, key=key)
+
     def reset(self, env_mask) -> None:
         pass
 
@@ -196,17 +253,21 @@ class DrQ(OffPolicyAlgorithm[DrQConfig]):
 
     @override
     def sample_action(self, observation: Observation, task_ids: jax.Array) -> tuple[Self, Action]:
+        key, aug_key = jax.random.split(self.key)
+        aug_obs, _ = augment(observation, aug_key)
         actions, key = _sample_action(
-            self.critic, observation, task_ids, self.key,
+            self.critic, aug_obs, task_ids, key,
             self.step, self.v_min, self.v_max, self.n_atoms,
             self.eps_start, self.eps_end, self.eps_decay_steps,
         )
-        return self.replace(key=key, step=self.step + 1), actions # jax.device_get(actions)
+        return self.replace(key=key, step=self.step + self.num_tasks), actions
 
     @override
     def eval_action(self, observation: Observation, task_ids: jnp.ndarray) -> Action:
+        rng = jax.random.PRNGKey(np.random.randint(0, 2**31))
+        aug_obs, _ = augment(observation, rng)
         return jax.device_get(
-            _eval_action(self.critic, observation, task_ids, self.v_min, self.v_max, self.n_atoms)
+            _eval_action(self.critic, aug_obs, task_ids, self.v_min, self.v_max, self.n_atoms)
         )
 
     @jax.jit
@@ -215,18 +276,18 @@ class DrQ(OffPolicyAlgorithm[DrQConfig]):
         print("TRACING")
         task_ids = data.task_ids
 
-        next_obs_logits = self.critic.apply_fn(self.critic.params, data.next_observations, task_ids).mean(axis=0)
+        next_obs_logits = self.critic.apply_fn(self.critic.params, data.next_observations, task_ids)
         support = jnp.linspace(self.v_min, self.v_max, self.n_atoms)
         next_q_values = jnp.sum(jax.nn.softmax(next_obs_logits, axis=-1) * support, axis=-1)
 
         target_logits = self.critic.apply_fn(self.critic.target_params, data.next_observations, task_ids)
-        target_probs = jax.nn.softmax(target_logits, axis=-1).mean(axis=0)
-        
+        target_probs = jax.nn.softmax(target_logits, axis=-1)
+
         next_actions = jnp.argmax(next_q_values, axis=-1)
         target_dist = target_probs[jnp.arange(data.observations.shape[0]), next_actions]
 
         tz_j = jnp.clip(
-            data.rewards + self.gamma * (1 - data.truncations) * support, 
+            data.rewards + (self.gamma ** self.nstep) * (1 - data.dones) * support,
             self.v_min,
             self.v_max,
         )
@@ -245,7 +306,7 @@ class DrQ(OffPolicyAlgorithm[DrQConfig]):
             m = jax.lax.stop_gradient(m)
    
             online_logits = self.critic.apply_fn(params, data.observations, task_ids)
-            online_logits = online_logits[:, jnp.arange(B), data.actions, :]
+            online_logits = online_logits[jnp.arange(B), data.actions, :]
             log_probs = jax.nn.log_softmax(online_logits, axis=-1)
             loss = -(m * log_probs).sum(axis=-1).mean()
             return loss, {"losses/online_logits": online_logits.mean()}
@@ -278,86 +339,116 @@ class DrQ(OffPolicyAlgorithm[DrQConfig]):
 
     @override
     def update(self, data: AtariReplayBufferSamples) -> tuple[Self, LogDict]:
-        return self._update_inner(data)
+        key, aug_key1, aug_key2 = jax.random.split(self.key, 3)
+        aug_obs, _ = augment(data.observations, aug_key1)
+        aug_next_obs, _ = augment(data.next_observations, aug_key2)
+        aug_data = data._replace(observations=aug_obs, next_observations=aug_next_obs)
+        self = self.replace(key=key)
+        return self._update_inner(aug_data)
 
-    def _split_critic_activations(
-        self, critic_acts: LayerActivationsDict
-    ) -> tuple[LayerActivationsDict, ...]:
-        return tuple(
-            {key: value[i] for key, value in critic_acts.items()}
-            for i in range(self.num_critics)
-        )
+    @jax.jit
+    def compute_weights(self, data: AtariReplayBufferSamples) -> tuple[Self, LogDict]:
+        B = data.observations.shape[0]
+        per_task_batch = B // self.num_tasks
+
+        # Sort by task_id and reshape to (num_tasks, per_task_batch, ...)
+        sorted_idx = jnp.argsort(data.task_ids)
+
+        def split(x):
+            x_sorted = x[sorted_idx]
+            return x_sorted.reshape(self.num_tasks, per_task_batch, *x.shape[1:])
+
+        obs        = split(data.observations)       # (T, B/T, C, H, W)
+        next_obs   = split(data.next_observations)  # (T, B/T, C, H, W)
+        rewards    = split(data.rewards)            # (T, B/T, 1)
+        actions    = split(data.actions)            # (T, B/T)
+        dones      = split(data.dones)               # (T, B/T, 1)
+        task_ids   = split(data.task_ids)           # (T, B/T)
+
+        support  = jnp.linspace(self.v_min, self.v_max, self.n_atoms)
+        delta_z  = (self.v_max - self.v_min) / (self.n_atoms - 1)
+
+        def per_task_loss(params, t_obs, t_next_obs, t_rewards, t_actions, t_dones, t_task_ids):
+            next_logits_online = self.critic.apply_fn(params, t_next_obs, t_task_ids)
+            next_q = jnp.sum(jax.nn.softmax(next_logits_online, axis=-1) * support, axis=-1)
+            next_actions = jnp.argmax(next_q, axis=-1)
+
+            target_logits = self.critic.apply_fn(self.critic.target_params, t_next_obs, t_task_ids)
+            target_probs = jax.nn.softmax(target_logits, axis=-1)
+            target_dist = target_probs[jnp.arange(per_task_batch), next_actions]
+
+            tz_j = jnp.clip(
+                t_rewards + (self.gamma ** self.nstep) * (1 - t_dones) * support,
+                self.v_min, self.v_max,
+            )
+            b = (tz_j - self.v_min) / delta_z
+            l = jnp.floor(b).astype(jnp.int32)
+            u = jnp.ceil(b).astype(jnp.int32)
+
+            m = jnp.zeros((per_task_batch, self.n_atoms))
+            m = m.at[jnp.arange(per_task_batch)[:, None], l].add(target_dist * (u - b))
+            m = m.at[jnp.arange(per_task_batch)[:, None], u].add(target_dist * (b - l))
+            m = jax.lax.stop_gradient(m)
+
+            online_logits = self.critic.apply_fn(params, t_obs, t_task_ids)
+            online_logits = online_logits[jnp.arange(per_task_batch), t_actions, :]
+            log_probs = jax.nn.log_softmax(online_logits, axis=-1)
+            return -(m * log_probs).sum(axis=-1).mean()
+
+        _, critic_grads = jax.vmap(
+            jax.value_and_grad(per_task_loss),
+            in_axes=(None, 0, 0, 0, 0, 0, 0),
+            out_axes=0,
+        )(self.critic.params, obs, next_obs, rewards, actions, dones, task_ids)
+
+        flat_critic_grads = jax.vmap(
+            lambda x: jax.flatten_util.ravel_pytree(x)[0]
+        )(critic_grads)
+
+        critic_avg_cos_sim, critic_cos_sim_mat = vmap_cos_sim(flat_critic_grads, self.num_tasks)
+        critic_avg_grad_magnitude = jnp.linalg.norm(flat_critic_grads, axis=1).mean()
+        critic_conflict_metrics = compute_conflict_metrics(critic_cos_sim_mat, flat_critic_grads)
+
+        return self, {
+            "critic_avg_cos_sim":             critic_avg_cos_sim,
+            "critic_avg_grad_magnitude":      critic_avg_grad_magnitude,
+            "critic_conflict_rate":           critic_conflict_metrics["conflict_rate"],
+            "critic_mean_conflict_magnitude": critic_conflict_metrics["mean_conflict_magnitude"],
+            "critic_mean_conflict_angle":     critic_conflict_metrics["mean_conflict_angle"],
+            "critic_per_task_conflict_rate":  critic_conflict_metrics["per_task_conflict_rate"],
+            "critic_per_task_grad_magnitude": critic_conflict_metrics["per_task_grad_magnitude"],
+            "critic_pairwise_conflict":       critic_conflict_metrics["pairwise_conflict"],
+            "critic_pairwise_cos_sim":        critic_conflict_metrics["pairwise_cos_sim"],
+            "critic_pairwise_angle":          critic_conflict_metrics["pairwise_angle"],
+        }
 
     @jax.jit
     def _get_intermediates(
         self, data: AtariReplayBufferSamples
-    ) -> tuple[Self, Intermediates, Intermediates]:
-        key, critic_activations_key = jax.random.split(self.key, 2)
-
-        actions_dist: distrax.Distribution
-        batch_size = data.observations.shape[0]
-        actions_dist, actor_state = self.actor.apply_fn(
-            self.actor.params, data.observations, mutable="intermediates"
-        )
-        actions = actions_dist.sample(seed=critic_activations_key)
-
+    ) -> tuple[Self, Intermediates]:
         _, critic_state = self.critic.apply_fn(
-            self.critic.params, data.observations, actions, mutable="intermediates"
+            self.critic.params, data.observations, data.task_ids, mutable="intermediates"
         )
-
-        actor_intermediates = jax.tree.map(
-            lambda x: x.reshape(batch_size, -1), actor_state["intermediates"]
-        )
-        critic_intermediates = jax.tree.map(
-            lambda x: x.reshape(self.num_critics, batch_size, -1),
-            critic_state["intermediates"]["VmapQValueFunction_0"],
-        )
-
-        self = self.replace(key=key)
-
-        # HACK: Explicitly using the generated name of the Vmap Critic module here.
-        return (
-            self,
-            actor_intermediates,
-            critic_intermediates,
-        )
+        return self, critic_state["intermediates"]
 
     @override
     def get_metrics(
         self, metrics: Metrics, data: AtariReplayBufferSamples
     ) -> tuple[Self, LogDict]:
-        self, actor_intermediates, critic_intermediates = self._get_intermediates(data)
+        self, critic_intermediates = self._get_intermediates(data)
 
-        actor_acts = extract_activations(actor_intermediates)
         critic_acts = extract_activations(critic_intermediates)
-        critic_acts = self._split_critic_activations(critic_acts)
 
-        # TODO: None of the dormant neuron logs / srank compute are jitted at the top level
-        logs: LogDict
-        logs = {}
+        logs: LogDict = {}
         if metrics.is_enabled(Metrics.DORMANT_NEURONS):
             logs.update(
                 {
-                    f"metrics/dormant_neurons_actor_{log_name}": log_value
-                    for log_name, log_value in get_dormant_neuron_logs(
-                        actor_acts
-                    ).items()
+                    f"metrics/dormant_neurons_critic_0_{log_name}": log_value
+                    for log_name, log_value in get_dormant_neuron_logs(critic_acts).items()
                 }
             )
         if metrics.is_enabled(Metrics.SRANK):
-            for key, value in actor_acts.items():
-                logs[f"metrics/srank_actor_{key}"] = compute_srank(value)
-
-        for i, acts in enumerate(critic_acts):
-            if metrics.is_enabled(Metrics.DORMANT_NEURONS):
-                logs.update(
-                    {
-                        f"metrics/dormant_neurons_critic_{i}_{log_name}": log_value
-                        for log_name, log_value in get_dormant_neuron_logs(acts).items()
-                    }
-                )
-            if metrics.is_enabled(Metrics.SRANK):
-                for key, value in acts.items():
-                    logs[f"metrics/srank_critic_{i}_{key}"] = compute_srank(value)
+            for key, value in critic_acts.items():
+                logs[f"metrics/srank_critic_0_{key}"] = compute_srank(value)
 
         return self, logs

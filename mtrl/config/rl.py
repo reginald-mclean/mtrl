@@ -3,11 +3,14 @@ from dataclasses import dataclass
 from .utils import Metrics
 
 from mtrl.config.nn import ImpalaEncoderConfig, TaskEmbeddingConfig
+from mtrl.config.optim import OptimizerConfig
 
 from mtrl.config.networks import (
     QValueFunctionConfig,
     VanillaNetworkConfig,
 )
+
+from .utils import Optimizer
 
 @dataclass(frozen=True)
 class AlgorithmConfig:
@@ -47,14 +50,14 @@ class OffPolicyTrainingConfig(TrainingConfig):
 
 @dataclass(frozen=True)
 class DrQTrainingConfig(OffPolicyTrainingConfig):
-    warmstart_steps: int = 1_600
-    buffer_size: int = 10_000 * 26  # 100k steps per game × 26 games
-    batch_size: int = 32 * 26        # 32 per task × 26 tasks
+    warmstart_steps: int = 1_000
+    buffer_size: int = 100_000  # per-task buffer size (shared indexing)
+    batch_size: int = 256
 
-    encoder_config: ImpalaEncoderConfig = ImpalaEncoderConfig()
+    encoder_config: ImpalaEncoderConfig = ImpalaEncoderConfig(scale=2)
     critic_config: QValueFunctionConfig = QValueFunctionConfig(
         use_classification=True,
-        num_atoms=51,
+        num_atoms=101,
         network_config=VanillaNetworkConfig(width=512, depth=2),
     )
     task_embed_config: TaskEmbeddingConfig = TaskEmbeddingConfig()
@@ -63,11 +66,18 @@ class DrQTrainingConfig(OffPolicyTrainingConfig):
     # Epsilon schedule
     eps_start: float = 1.0
     eps_end: float = 0.01
-    eps_decay_steps: int = 10_000
+    eps_decay_steps: int = 5_000  # 5% of 100k total_timesteps
     # Categorical support
-    v_min: float = 0.0
+    v_min: float = -10.0
     v_max: float = 10.0
-    num_tasks:int = 26
+    num_tasks: int = 26
+    normalize_rewards: bool = True
+    nstep: int = 3
+    replay_ratio: int = 2
+    eval_step_frequency: int = 10_000
+    augment: bool = True
+    shrink_perturb_frequency: int = 50000  # steps between shrink-and-perturb resets (Archive default)
+    shrink_rate: float = 0.5  # interpolation rate: old*(1-rate) + new*rate
 
 @dataclass(frozen=True)
 class OnPolicyTrainingConfig(TrainingConfig):

@@ -67,12 +67,53 @@ class QValueFunction(nn.Module):
             )(x)
         else:
             assert self.action_dim is not None, 'Need to pass action_dim to QValueFunction'
-            return get_nn_arch_for_config(self.config.network_config)(
+            if False: #not self.config.dueling:
+                return get_nn_arch_for_config(self.config.network_config)(
+                    config=self.config.network_config,
+                    head_dim=self.config.num_atoms * self.action_dim,
+                    head_kernel_init=uniform(3e-3),
+                    head_bias_init=uniform(3e-3),
+                )(state).reshape(state.shape[0], self.action_dim, self.config.num_atoms)
+            trunk = get_nn_arch_for_config(self.config.network_config)(
                 config=self.config.network_config,
-                head_dim=self.config.num_atoms * self.action_dim,
+                head_dim=self.config.network_config.width,
                 head_kernel_init=uniform(3e-3),
                 head_bias_init=uniform(3e-3),
-            )(state).reshape(state.shape[0], self.action_dim, self.config.num_atoms)
+                activate_last=True,
+            )(state)
+            adv = nn.Dense(self.action_dim * self.config.num_atoms, kernel_init=uniform(3e-3))(trunk)
+            adv = adv.reshape(state.shape[0], self.action_dim, self.config.num_atoms)
+            value = nn.Dense(self.config.num_atoms, kernel_init=uniform(3e-3))(trunk)
+            value = value.reshape(state.shape[0], 1, self.config.num_atoms)
+            return value + adv - adv.mean(axis=1, keepdims=True) 
+
+
+class DistributionalDense(nn.Module):
+    """Dueling distributional Q-head matching the reference implementation."""
+    action_dim: int
+    n_hidden: int = 512
+    dueling: bool = True
+    num_atoms: int = 51
+    layernorm: bool = False
+
+    @nn.compact
+    def __call__(self, x: jax.Array) -> jax.Array:
+        initializer = nn.initializers.xavier_uniform()
+        x = nn.Dense(features=self.n_hidden, kernel_init=initializer)(x)
+        if self.layernorm:
+            x = nn.LayerNorm()(x)
+        x = nn.relu(x)
+        self.sow("intermediates", "q_head_hidden", x)
+        if self.dueling:
+            adv = nn.Dense(self.action_dim * self.num_atoms, kernel_init=initializer)(x)
+            adv = adv.reshape((-1, self.action_dim, self.num_atoms))
+            value = nn.Dense(self.num_atoms, kernel_init=initializer)(x)
+            value = value.reshape((-1, 1, self.num_atoms))
+            x = value + (adv - jnp.mean(adv, axis=-2, keepdims=True))
+        else:
+            x = nn.Dense(self.action_dim * self.num_atoms, kernel_init=initializer)(x)
+            x = x.reshape((-1, self.action_dim, self.num_atoms))
+        return x
 
 
 class ImpalaDQN(nn.Module):
@@ -80,18 +121,24 @@ class ImpalaDQN(nn.Module):
     q_function_config: QValueFunctionConfig
     task_embed_config: TaskEmbeddingConfig
     action_dim: int
+    use_layer_norm: bool = True
+    n_hidden: int = 2048
+    num_atoms: int = 51
 
     @nn.compact
-    def __call__(self, x: jax.Array, task_ids: jax.Array): 
+    def __call__(self, x: jax.Array, task_ids: jax.Array):
         enc = get_nn_arch_for_config(self.impala_config)(self.impala_config)(x)
         embed = get_nn_arch_for_config(self.task_embed_config)(config=self.task_embed_config)(task_ids)
         x = jnp.concatenate([enc, embed], axis=-1)
-        critic_cls = partial(
-            QValueFunction,
-            config=self.q_function_config,
+        if self.use_layer_norm:
+            x = nn.LayerNorm()(x)
+        return DistributionalDense(
             action_dim=self.action_dim,
-        )
-        return Ensemble(critic_cls, num=self.impala_config.num_critics)(x)
+            n_hidden=self.n_hidden,
+            dueling=True,
+            num_atoms=self.num_atoms,
+            layernorm=True,
+        )(x)
 
 class ValueFunction(nn.Module):
     """A Flax module approximating a Q-Value function."""

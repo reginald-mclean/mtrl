@@ -97,7 +97,7 @@ class Experiment:
             )
 
         envs = self.env.spawn(seed=self.seed)
-
+        eval_envs = self.env.spawn_eval(seed=self.seed)
         algorithm_cls = get_algorithm_for_config(self.algorithm)
         algorithm: Algorithm
         algorithm = algorithm_cls.initialize(self.algorithm, self.env, seed=self.seed)
@@ -170,6 +170,7 @@ class Experiment:
         agent = algorithm.train(
             config=self.training_config,
             envs=envs,
+            eval_envs=eval_envs,
             env_config=self.env,
             run_timestamp=self._timestamp,
             seed=self.seed,

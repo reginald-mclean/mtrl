@@ -42,7 +42,7 @@ from mtrl.types import (
 )
 
 from .base import OffPolicyAlgorithm
-from .utils import TrainState
+from .utils import TrainState, vmap_cos_sim, compute_conflict_metrics
 
 
 class MultiTaskTemperature(nn.Module):
@@ -477,156 +477,123 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
         else:
             task_weights = None
 
-        actor_data = critic_data = data
-        actor_alpha_vals = critic_alpha_vals = alpha_vals
-        actor_task_weights = critic_task_weights = task_weights
-        alpha_val_indices = None
-        split_actor_loss_value = split_critic_loss_value = split_qf_values = None
-
         split_data, _ = self.split_data_by_tasks(data, task_ids)
         split_alpha_vals, alpha_val_indices = self.split_data_by_tasks(
             alpha_vals, task_ids
         )
-
         split_task_weights, _ = (
             self.split_data_by_tasks(task_weights, task_ids)
             if task_weights is not None
             else (None, None)
         )
-        def vmap_cos_sim(grads, num_tasks):
-            def calc_cos_sim(selected_grad, grads):
-                new_cos_sim = jnp.array(
-                    [
-                        jnp.sum(selected_grad * grads, axis=1)
-                        / (
-                            jnp.linalg.norm(selected_grad)
-                            * jnp.linalg.norm(grads, axis=1)
-                            + 1e-8
-                        )
-                    ]
-                )
-                return new_cos_sim
 
-            cos_sim_mat = jax.vmap(calc_cos_sim, in_axes=(0, None), out_axes=-1)(
-                grads, grads
+        # --- Critic ---
+        key, critic_loss_key = jax.random.split(self.key)
+        self = self.replace(key=key)
+
+        next_actions, next_action_log_probs = jax.vmap(
+            lambda x: self.actor.apply_fn(self.actor.params, x).sample_and_log_prob(
+                seed=critic_loss_key
             )
-            # Get upper triangle
-            mask = jnp.triu(jnp.ones((num_tasks, num_tasks)), k=1)
-            num_unique = mask.sum()
+        )(split_data.observations)
+        q_values = jax.vmap(self.critic.apply_fn, in_axes=(None, 0, 0))(
+            self.critic.target_params, split_data.next_observations, next_actions
+        )
 
-            masked_cos_sim = mask * cos_sim_mat
-            # n in upper triangle
-            avg_cos_sim = masked_cos_sim.flatten().sum() / (num_unique + 1e-8)
-            return avg_cos_sim
-
-        if True: #self.return_split_critic_losses:
-            critic_alpha_vals = split_alpha_vals
-            critic_task_weights = split_task_weights
-            key, critic_loss_key = jax.random.split(self.key)
-            self = self.replace(key=key)
-
-            next_actions, next_action_log_probs = jax.vmap(
-                lambda x: self.actor.apply_fn(self.actor.params, x).sample_and_log_prob(
-                    seed=critic_loss_key
-                )
-            )(split_data.observations)
-            q_values = jax.vmap(self.critic.apply_fn, in_axes=(None, 0, 0))(
-                self.critic.target_params, split_data.next_observations, next_actions
+        def critic_loss(
+            params, _data, _q_values, _alpha_val, _next_action_log_probs, _task_weights=None
+        ):
+            min_qf_next_target = jnp.min(
+                _q_values, axis=0
+            ) - _alpha_val * _next_action_log_probs.reshape(-1, 1)
+            next_q_value = jax.lax.stop_gradient(
+                _data.rewards + (1 - _data.dones) * self.gamma * min_qf_next_target
             )
+            q_pred = self.critic.apply_fn(params, _data.observations, _data.actions)
+            if self.clip:
+                next_q_value = jnp.clip(next_q_value, -5000, 5000)
+                q_pred = jnp.clip(q_pred, -5000, 5000)
+            if _task_weights is not None:
+                loss = (_task_weights * (q_pred - next_q_value) ** 2).mean()
+            else:
+                loss = ((q_pred - next_q_value) ** 2).mean()
+            return loss, q_pred.mean()
 
-            def critic_loss(
-                params: FrozenDict,
-                _data: ReplayBufferSamples,
-                _q_values: Float[Array, "#batch 1"],
-                _alpha_val: Float[Array, "#batch 1"],
-                _next_action_log_probs: Float[Array, " #batch"],
-                _task_weights: Float[Array, "#batch 1"] | None = None,
-            ) -> tuple[Float[Array, ""], Float[Array, ""]]:
-                # next_action_log_probs is (B,) shaped because of the sum(axis=1), while Q values are (B, 1)
-                min_qf_next_target = jnp.min(
-                    _q_values, axis=0
-                ) - _alpha_val * _next_action_log_probs.reshape(-1, 1)
+        (_, _), critic_grads = jax.vmap(
+            jax.value_and_grad(critic_loss, has_aux=True),
+            in_axes=(None, 0, 0, 0, 0, 0),
+            out_axes=0,
+        )(
+            self.critic.params,
+            split_data,
+            q_values,
+            split_alpha_vals,
+            next_action_log_probs,
+            split_task_weights,
+        )
+        flat_critic_grads = jax.vmap(
+            lambda x: jax.flatten_util.ravel_pytree(x)[0]
+        )(critic_grads)
+        critic_avg_cos_sim, critic_cos_sim_mat = vmap_cos_sim(flat_critic_grads, self.num_tasks)
+        critic_avg_grad_magnitude = jnp.linalg.norm(flat_critic_grads, axis=1).mean()
+        critic_conflict_metrics = compute_conflict_metrics(critic_cos_sim_mat, flat_critic_grads)
 
-                next_q_value = jax.lax.stop_gradient(
-                    _data.rewards + (1 - _data.dones) * self.gamma * min_qf_next_target
-                )
+        # --- Actor ---
+        key, actor_loss_key = jax.random.split(self.key)
+        self = self.replace(key=key)
 
-                q_pred = self.critic.apply_fn(params, _data.observations, _data.actions)
-                # HACK: Clipping Q values to approximate theoretical maximum for Metaworld
-                if self.clip: # and not isinstance(self.actor.opt_state[0], PCGradState) and not isinstance(self.actor.opt_state[0], GradNormState):
-                    next_q_value = jnp.clip(next_q_value, -5000, 5000)
-                    q_pred = jnp.clip(q_pred, -5000, 5000)
-
-                if _task_weights is not None:
-                    loss = (_task_weights * (q_pred - next_q_value) ** 2).mean()
-                else:
-                    loss = ((q_pred - next_q_value) ** 2).mean()
-                return loss, q_pred.mean()
-
-
-            (_, _), critic_grads = jax.vmap(
-                jax.value_and_grad(critic_loss, has_aux=True),
-                in_axes=(None, 0, 0, 0, 0, 0),
-                out_axes=0,
-            )(
-                self.critic.params,
-                split_data,
-                q_values,
-                split_alpha_vals,
-                next_action_log_probs,
-                task_weights,
+        def actor_loss(params, _data, _alpha_val, _task_weights=None):
+            action_samples, log_probs = self.actor.apply_fn(
+                params, _data.observations
+            ).sample_and_log_prob(seed=actor_loss_key)
+            log_probs = log_probs.reshape(-1, 1)
+            q_values = self.critic.apply_fn(
+                self.critic.params, _data.observations, action_samples
             )
-            flat_task_gradients = jax.vmap(lambda x: jax.flatten_util.ravel_pytree(x)[0])(
-                critic_grads
-            )
-            critic_avg_cos_sim = vmap_cos_sim(flat_task_gradients, self.num_tasks)
-            critic_avg_grad_magnitude = (jnp.linalg.norm(flat_task_gradients, axis=1)).mean()
+            min_qf_values = jnp.min(q_values, axis=0)
+            if _task_weights is not None:
+                loss = (_task_weights * (_alpha_val * log_probs - min_qf_values)).mean()
+            else:
+                loss = (_alpha_val * log_probs - min_qf_values).mean()
+            return loss, log_probs
 
-        if True: # self.return_split_actor_losses:
-            split_data = split_data
-            actor_alpha_vals = split_alpha_vals
-            actor_task_weights = split_task_weights
-            key, actor_loss_key = jax.random.split(self.key)
+        (_, _), actor_grads = jax.vmap(
+            jax.value_and_grad(actor_loss, has_aux=True),
+            in_axes=(None, 0, 0, 0),
+            out_axes=0,
+        )(self.actor.params, split_data, split_alpha_vals, split_task_weights)
 
-            def actor_loss(
-                params: FrozenDict,
-                _data: ReplayBufferSamples,
-                _alpha_val: Float[Array, "batch 1"],
-                _task_weights: Float[Array, "batch 1"] | None = None,
-            ):
-                action_samples, log_probs = self.actor.apply_fn(
-                    params, _data.observations
-                ).sample_and_log_prob(seed=actor_loss_key)
-                log_probs = log_probs.reshape(-1, 1)
-
-                q_values = self.critic.apply_fn(
-                    self.critic.params, _data.observations, action_samples
-                )
-                min_qf_values = jnp.min(q_values, axis=0)
-                if _task_weights is not None:
-                    loss = (task_weights * (_alpha_val * log_probs - min_qf_values)).mean()
-                else:
-                    loss = (_alpha_val * log_probs - min_qf_values).mean()
-                return loss, log_probs
-
-
-            (_, _), actor_grads = jax.vmap(
-                jax.value_and_grad(actor_loss, has_aux=True),
-                in_axes=(None, 0, 0, 0),
-                out_axes=0,
-            )(self.actor.params, split_data, split_alpha_vals, task_weights)
-
-            flat_task_gradients = jax.vmap(lambda x: jax.flatten_util.ravel_pytree(x)[0])(
-                actor_grads
-            )
-            actor_avg_cos_sim = vmap_cos_sim(flat_task_gradients, self.num_tasks)
-            actor_avg_grad_magnitude = (jnp.linalg.norm(flat_task_gradients, axis=1)).mean()
+        flat_actor_grads = jax.vmap(
+            lambda x: jax.flatten_util.ravel_pytree(x)[0]
+        )(actor_grads)
+        actor_avg_cos_sim, actor_cos_sim_mat = vmap_cos_sim(flat_actor_grads, self.num_tasks)
+        actor_avg_grad_magnitude = jnp.linalg.norm(flat_actor_grads, axis=1).mean()
+        actor_conflict_metrics = compute_conflict_metrics(actor_cos_sim_mat, flat_actor_grads)
 
         return self, {
-            "critic_avg_cos_sim": critic_avg_cos_sim,
-            "critic_avg_grad_magnitude": critic_avg_grad_magnitude,
-            "actor_avg_cos_sim": actor_avg_cos_sim,
-            "actor_avg_grad_magnitude": actor_avg_grad_magnitude,
+            # Existing metrics
+            "critic_avg_cos_sim":             critic_avg_cos_sim,
+            "critic_avg_grad_magnitude":      critic_avg_grad_magnitude,
+            "actor_avg_cos_sim":              actor_avg_cos_sim,
+            "actor_avg_grad_magnitude":       actor_avg_grad_magnitude,
+            # New critic conflict metrics
+            "critic_conflict_rate":           critic_conflict_metrics["conflict_rate"],
+            "critic_mean_conflict_magnitude": critic_conflict_metrics["mean_conflict_magnitude"],
+            "critic_mean_conflict_angle":     critic_conflict_metrics["mean_conflict_angle"],
+            "critic_per_task_conflict_rate":  critic_conflict_metrics["per_task_conflict_rate"],
+            "critic_per_task_grad_magnitude": critic_conflict_metrics["per_task_grad_magnitude"],
+            # New actor conflict metrics
+            "actor_conflict_rate":            actor_conflict_metrics["conflict_rate"],
+            "actor_mean_conflict_magnitude":  actor_conflict_metrics["mean_conflict_magnitude"],
+            "actor_mean_conflict_angle":      actor_conflict_metrics["mean_conflict_angle"],
+            "actor_per_task_conflict_rate":   actor_conflict_metrics["per_task_conflict_rate"],
+            "actor_per_task_grad_magnitude":  actor_conflict_metrics["per_task_grad_magnitude"],
+            "critic_pairwise_conflict": critic_conflict_metrics["pairwise_conflict"],
+            "critic_pairwise_cos_sim":  critic_conflict_metrics["pairwise_cos_sim"],
+            "critic_pairwise_angle":    critic_conflict_metrics["pairwise_angle"],
+            "actor_pairwise_conflict":  actor_conflict_metrics["pairwise_conflict"],
+            "actor_pairwise_cos_sim":   actor_conflict_metrics["pairwise_cos_sim"],
+            "actor_pairwise_angle":     actor_conflict_metrics["pairwise_angle"],
         }
 
 

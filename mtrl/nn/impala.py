@@ -32,16 +32,16 @@ class ImpalaBlock(nn.Module):
 
 class ImpalaEncoder(nn.Module):
     config: ImpalaEncoderConfig
+
     def setup(self):
         self.stack = [ImpalaBlock(self.config.scale * stack, blocks=self.config.blocks) for stack in self.config.stacks]
 
     def __call__(self, x: jax.Array) -> jax.Array:
-        x = jnp.transpose(x, (0, 2, 3, 1))
-        x = x.astype(jnp.float32) / 255.0
+        if x.dtype == jnp.uint8:
+            x = jnp.transpose(x, (0, 2, 3, 1))
+            x = (x.astype(jnp.float32) / 255.0 - 0.5) * 2
         for stack in self.stack:
             x = stack(x)
-        x = nn.relu(x) 
+        x = nn.relu(x)
         x = x.reshape((x.shape[0], -1))
-        if self.config.use_layer_norm:
-            x = nn.LayerNorm()(x)
         return x

@@ -28,12 +28,16 @@ class QValueFunctionConfig:
     num_atoms: int | None = None
     """If using use_classification, describes the number of atoms to use per action dimension."""
 
+    dueling: bool = False
+    """Whether to use a dueling architecture (separate value and advantage streams)."""
+
 @dataclass(frozen=True)
 class ValueFunctionConfig(QValueFunctionConfig): ...
 
 @dataclass(frozen=True)
-class ImpalaDQNConfig: 
+class ImpalaDQNConfig:
     impala_config: ImpalaEncoderConfig = ImpalaEncoderConfig()
     q_function_config: QValueFunctionConfig = QValueFunctionConfig(use_classification=True, num_atoms=51)
     task_embed_config: TaskEmbeddingConfig = TaskEmbeddingConfig()
+    use_layer_norm: bool = True
 
