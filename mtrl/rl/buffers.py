@@ -238,6 +238,8 @@ class MultiTaskReplayBuffer:
         env_action_space: gym.Space,
         seed: int | None = None,
         max_steps: int = 500,
+        normalize_rewards: bool = False,
+        reward_norm_eps: float = 1e-8,
         reward_filter: str | None = None,
         sigma: float | None = None,
         alpha: float | None = None,
@@ -253,6 +255,12 @@ class MultiTaskReplayBuffer:
         self._obs_shape = np.array(env_obs_space.shape).prod()
         self._action_shape = np.array(env_action_space.shape).prod()
         self.full = False
+
+        self.normalize_rewards = normalize_rewards
+
+        self._min_rewards = np.full(num_tasks, np.inf, dtype=np.float64)
+        self._max_rewards = np.full(num_tasks, -np.inf, dtype=np.float64)
+        self.reward_norm_eps = reward_norm_eps
 
         self.reset()
 
@@ -333,6 +341,10 @@ class MultiTaskReplayBuffer:
         self.next_obs[self.pos] = next_obs.copy()
         self.dones[self.pos] = done.copy().reshape(-1, 1)
         self.rewards[self.pos] = reward.reshape(-1, 1).copy()
+
+        if self.normalize_rewards:
+            self._min_rewards = np.minimum(self._min_rewards, reward)
+            self._max_rewards = np.maximum(self._max_rewards, reward)
 
         self._advance_position(1)
 
@@ -423,12 +435,19 @@ class MultiTaskReplayBuffer:
                 size=(single_task_batch_size,),
             )
 
+            rewards = self.rewards[sample_idx]
+            if self.normalize_rewards:
+                # Per-task min-max normalization (shape: [sample, task, 1])
+                mn = self._min_rewards[np.newaxis, :, np.newaxis]
+                mx = self._max_rewards[np.newaxis, :, np.newaxis]
+                rewards = (rewards - mn) / (mx - mn + self.reward_norm_eps)
+
             batch = (
                 self.obs[sample_idx],
                 self.actions[sample_idx],
                 self.next_obs[sample_idx],
                 self.dones[sample_idx],
-                self.rewards[sample_idx],
+                rewards,
             )
             mt_batch_size = single_task_batch_size * self.num_tasks
             batch = map(lambda x: x.reshape(mt_batch_size, *x.shape[2:]), batch)

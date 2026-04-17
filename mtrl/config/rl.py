@@ -39,7 +39,7 @@ class TrainingConfig:
     weights_actor_loss: bool = False
     weights_qf_vals: bool = False
     state_coverage:bool = False
-
+    normalize_rewards: bool = False
 
 @dataclass(frozen=True)
 class OffPolicyTrainingConfig(TrainingConfig):

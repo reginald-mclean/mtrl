@@ -105,6 +105,7 @@ class OffPolicyAlgorithm(
             num_tasks=self.num_tasks,
             env_obs_space=env_config.observation_space,
             env_action_space=env_config.action_space,
+            normalize_rewards=config.normalize_rewards,
             seed=seed,
             reward_filter=config.reward_filter,
             alpha=config.reward_filter_alpha,

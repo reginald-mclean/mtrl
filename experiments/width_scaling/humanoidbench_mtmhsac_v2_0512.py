@@ -50,6 +50,8 @@ def main() -> None:
                 )
             ),
             critic_config=QValueFunctionConfig(
+                #use_classification=True,
+                #num_atoms=101,
                 network_config=VanillaNetworkConfig(
                     width=WIDTH,
                     #num_tasks=num_tasks,
@@ -59,6 +61,7 @@ def main() -> None:
             num_critics=2,
         ),
         training_config=OffPolicyTrainingConfig(
+            normalize_rewards=True,
             total_steps=int(2_000_000 * num_tasks),
             buffer_size=int(100_000 * num_tasks),
             batch_size=int(128*num_tasks),

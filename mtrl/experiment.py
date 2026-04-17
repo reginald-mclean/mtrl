@@ -98,7 +98,7 @@ class Experiment:
 
         envs = self.env.spawn(seed=self.seed)
 
-        if isinstance(self.env, AtariConfig):
+        if hasattr(self.env, 'spawn_eval'):
             eval_envs = self.env.spawn_eval(seed=self.seed)
         else:
             eval_envs = self.env.spawn(seed=self.seed)
