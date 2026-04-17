@@ -150,10 +150,10 @@ class OffPolicyAlgorithm(
         for global_step in range(start_step, config.total_steps // envs.num_envs):
             total_steps = global_step * envs.num_envs
 
-            if global_step < config.warmstart_steps and type(env_config) is MetaworldConfig:
+            if global_step < config.warmstart_steps and type(env_config) is not AtariConfig:
                 actions = envs.action_space.sample()
             else:
-                if type(env_config) is MetaworldConfig:
+                if type(env_config) is not AtariConfig:
                     self, actions = self.sample_action(obs)
                 else:
                     self, actions_jax = self.sample_action(obs, task_ids)
@@ -169,7 +169,7 @@ class OffPolicyAlgorithm(
                     done[:, None], np.stack(infos["final_obs"]), next_obs
                 )
 
-            if type(env_config) is MetaworldConfig:
+            if type(env_config) is not AtariConfig:
                 replay_buffer.add(obs, buffer_obs, actions, rewards, done)
             else:
                 replay_buffer.add(obs, buffer_obs, actions, rewards, truncations, done)
@@ -245,6 +245,7 @@ class OffPolicyAlgorithm(
                         print(eval_metrics)
                         print(f"total_steps={total_steps}, mean evaluation return: {mean_returns:.4f}, median HNS: {mean_success_rate:.4f}")
                     else:
+                        print(per_task_metrics)
                         eval_metrics = {
                             "charts/mean_success_rate": float(mean_success_rate),
                             "charts/mean_evaluation_return": float(mean_returns),
