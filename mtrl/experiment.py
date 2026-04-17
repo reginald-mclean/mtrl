@@ -25,7 +25,7 @@ from mtrl.rl.algorithms import (
     get_algorithm_for_config,
 )
 from mtrl.types import CheckpointMetadata
-
+from mtrl.envs import AtariConfig
 
 @dataclass
 class Experiment:
@@ -97,7 +97,12 @@ class Experiment:
             )
 
         envs = self.env.spawn(seed=self.seed)
-        eval_envs = self.env.spawn_eval(seed=self.seed)
+
+        if isinstance(self.env, AtariConfig):
+            eval_envs = self.env.spawn_eval(seed=self.seed)
+        else:
+            eval_envs = self.env.spawn(seed=self.seed)
+
         algorithm_cls = get_algorithm_for_config(self.algorithm)
         algorithm: Algorithm
         algorithm = algorithm_cls.initialize(self.algorithm, self.env, seed=self.seed)

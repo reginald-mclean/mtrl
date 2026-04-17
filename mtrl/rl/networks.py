@@ -36,7 +36,7 @@ class ContinuousActionPolicy(nn.Module):
 
         mean, log_std = jnp.split(x, 2, axis=-1)
         log_std = jnp.clip(
-            log_std, a_min=self.config.log_std_min, a_max=self.config.log_std_max
+            log_std, min=self.config.log_std_min, max=self.config.log_std_max
         )
         std = jnp.exp(log_std)
 
