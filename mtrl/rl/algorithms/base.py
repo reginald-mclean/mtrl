@@ -232,7 +232,7 @@ class OffPolicyAlgorithm(
                     last_eval_episodes = episodes_ended
                     print('evaluating ...')
                     mean_success_rate, mean_returns, per_task_metrics = (
-                        env_config.evaluate(eval_envs, self)
+                        env_config.evaluate(eval_envs if eval_envs else envs, self)
                     )
                     if isinstance(env_config, AtariConfig):
                         eval_metrics = {

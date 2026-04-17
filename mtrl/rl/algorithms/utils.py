@@ -70,40 +70,105 @@ def vmap_cos_sim(
     return avg_cos_sim, cos_sim_mat
 
 
-def compute_conflict_metrics(
-    cos_sim_mat: Float[Array, "num_tasks num_tasks"],
-    flat_grads: Float[Array, "num_tasks num_params"],
-) -> dict[str, Float[Array, ""]]:
+def compute_sparsity_mismatch(flat_grads, eps=1e-3, tau=1.0):
+    """
+    For each ordered pair of tasks (A, B), compute the fraction of elements
+    where task A's gradient is near-zero but task B's is large.
+    Entry [i, j] = I(i->j): fraction of i's near-zero params strongly updated by j.
+    Diagonal is zeroed — a task cannot interfere with itself.
+    """
     num_tasks = flat_grads.shape[0]
-    diag_mask = jnp.eye(num_tasks, dtype=bool)
-    off_diag = ~diag_mask
-    conflict_mask = (cos_sim_mat < 0) & off_diag
-    n_pairs = num_tasks * (num_tasks - 1)
+    near_zero = jnp.abs(flat_grads) < eps   # (num_tasks, num_params)
+    large     = jnp.abs(flat_grads) > tau   # (num_tasks, num_params)
 
-    angles = jnp.degrees(jnp.arccos(jnp.clip(cos_sim_mat, -1.0, 1.0)))
+    # broadcast to (num_tasks, num_tasks, num_params): near_zero[i] AND large[j]
+    mismatch = near_zero[:, None, :] & large[None, :, :]
+    near_zero_counts = near_zero.sum(axis=1).clip(min=1)    # (num_tasks,)
+    interference_rate = mismatch.sum(axis=-1) / near_zero_counts[:, None]
+    interference_rate = interference_rate * (1 - jnp.eye(num_tasks))
+    return interference_rate  # (num_tasks, num_tasks)
 
-    conflict_rate = conflict_mask.sum() / n_pairs
-    mean_conflict_magnitude = jnp.where(
-        conflict_mask, jnp.abs(cos_sim_mat), 0.0
-    ).sum() / (conflict_mask.sum() + 1e-8)
-    mean_conflict_angle = jnp.where(
-        conflict_mask, angles, 0.0
-    ).sum() / (conflict_mask.sum() + 1e-8)
 
-    per_task_conflict_rate = conflict_mask.sum(axis=1) / (num_tasks - 1)
-    per_task_grad_magnitude = jnp.linalg.norm(flat_grads, axis=1)
+def compute_participation_ratio(flat_grads):
+    """
+    Per-task participation ratio — measures effective gradient dimensionality.
+    Near 1: dense/uniform gradient. Near 0: sparse/concentrated (overparameterized).
+    """
+    n   = flat_grads.shape[1]
+    l1  = jnp.abs(flat_grads).sum(axis=1)          # (num_tasks,)
+    l2_sq = (flat_grads ** 2).sum(axis=1)           # (num_tasks,)
+    return (l1 ** 2) / (n * l2_sq.clip(min=1e-10))  # (num_tasks,)
 
-    pairwise_conflict = conflict_mask.astype(jnp.float32)
-    pairwise_cos_sim = jnp.where(off_diag, cos_sim_mat, 0.0)
-    pairwise_angle = jnp.where(off_diag, angles, 0.0)
+
+def compute_effective_rank(flat_grads):
+    """
+    Effective rank of the joint gradient matrix via singular value entropy.
+    Computed on the (num_tasks x num_tasks) Gram matrix for efficiency.
+    Low effective rank => tasks are collapsing onto a shared gradient subspace.
+    """
+    G  = flat_grads @ flat_grads.T                          # (num_tasks, num_tasks)
+    sv = jnp.linalg.svd(G, compute_uv=False)               # (num_tasks,)
+    sv_dist = sv / sv.sum().clip(min=1e-10)
+    entropy = -(sv_dist * jnp.log(sv_dist + 1e-10)).sum()
+    return jnp.exp(entropy)
+
+
+def compute_conflict_metrics(cos_sim_mat, flat_grads, eps=1e-3, tau=1.0):
+    num_tasks  = flat_grads.shape[0]
+    off_diag   = 1 - jnp.eye(num_tasks)                    # float mask, (num_tasks, num_tasks)
+
+    # --- existing metrics ---
+    conflict_mask           = (cos_sim_mat < 0).astype(jnp.float32)
+
+    num_off_diag            = num_tasks * (num_tasks - 1)
+    conflict_rate           = (conflict_mask * off_diag).sum() / num_off_diag
+
+    magnitudes              = jnp.linalg.norm(flat_grads, axis=1)
+    outer_mag               = magnitudes[:, None] * magnitudes[None, :]
+    conflict_magnitude      = jnp.where(
+                                  (conflict_mask * off_diag).astype(bool),
+                                  jnp.abs(cos_sim_mat) * outer_mag,
+                                  0.0
+                              )
+    mean_conflict_magnitude = (conflict_magnitude * off_diag).sum() / num_off_diag
+
+    angles                  = jnp.degrees(jnp.arccos(jnp.clip(cos_sim_mat, -1.0, 1.0)))
+    mean_conflict_angle     = (angles * off_diag).sum() / num_off_diag
+
+    per_task_conflict_rate  = (conflict_mask * off_diag).sum(axis=1) / (num_tasks - 1)
+    per_task_grad_magnitude = magnitudes
+
+    # --- new elementwise metrics ---
+    interference_rate           = compute_sparsity_mismatch(flat_grads, eps=eps, tau=tau)
+    avg_interference_rate       = (interference_rate * off_diag).sum() / num_off_diag
+    asymmetry                   = (
+                                      jnp.abs(interference_rate - interference_rate.T) * off_diag
+                                  ).sum() / num_off_diag
+    per_task_interference_in    = (interference_rate * off_diag).sum(axis=0) / (num_tasks - 1)
+    per_task_interference_out   = (interference_rate * off_diag).sum(axis=1) / (num_tasks - 1)
+
+    participation_ratios        = compute_participation_ratio(flat_grads)
+    avg_participation_ratio     = participation_ratios.mean()
+
+    effective_rank              = compute_effective_rank(flat_grads)
 
     return {
-        "conflict_rate":           conflict_rate,
-        "mean_conflict_magnitude": mean_conflict_magnitude,
-        "mean_conflict_angle":     mean_conflict_angle,
-        "per_task_conflict_rate":  per_task_conflict_rate,
-        "per_task_grad_magnitude": per_task_grad_magnitude,
-        "pairwise_conflict":       pairwise_conflict,
-        "pairwise_cos_sim":        pairwise_cos_sim,
-        "pairwise_angle":          pairwise_angle,
+        # existing
+        "conflict_rate":                conflict_rate,
+        "mean_conflict_magnitude":      mean_conflict_magnitude,
+        "mean_conflict_angle":          mean_conflict_angle,
+        "per_task_conflict_rate":       per_task_conflict_rate,
+        "per_task_grad_magnitude":      per_task_grad_magnitude,
+        "pairwise_conflict":            conflict_mask,
+        "pairwise_cos_sim":             cos_sim_mat,
+        "pairwise_angle":               angles,
+        # new
+        "avg_interference_rate":        avg_interference_rate,
+        "interference_asymmetry":       asymmetry,
+        "per_task_interference_in":     per_task_interference_in,
+        "per_task_interference_out":    per_task_interference_out,
+        "pairwise_interference_rate":   interference_rate,
+        "avg_participation_ratio":      avg_participation_ratio,
+        "per_task_participation_ratio": participation_ratios,
+        "effective_rank":               effective_rank,
     }

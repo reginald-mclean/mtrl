@@ -572,30 +572,48 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
 
         return self, {
             # Existing metrics
-            "critic_avg_cos_sim":             critic_avg_cos_sim,
-            "critic_avg_grad_magnitude":      critic_avg_grad_magnitude,
-            "actor_avg_cos_sim":              actor_avg_cos_sim,
-            "actor_avg_grad_magnitude":       actor_avg_grad_magnitude,
-            # New critic conflict metrics
-            "critic_conflict_rate":           critic_conflict_metrics["conflict_rate"],
-            "critic_mean_conflict_magnitude": critic_conflict_metrics["mean_conflict_magnitude"],
-            "critic_mean_conflict_angle":     critic_conflict_metrics["mean_conflict_angle"],
-            "critic_per_task_conflict_rate":  critic_conflict_metrics["per_task_conflict_rate"],
-            "critic_per_task_grad_magnitude": critic_conflict_metrics["per_task_grad_magnitude"],
-            # New actor conflict metrics
-            "actor_conflict_rate":            actor_conflict_metrics["conflict_rate"],
-            "actor_mean_conflict_magnitude":  actor_conflict_metrics["mean_conflict_magnitude"],
-            "actor_mean_conflict_angle":      actor_conflict_metrics["mean_conflict_angle"],
-            "actor_per_task_conflict_rate":   actor_conflict_metrics["per_task_conflict_rate"],
-            "actor_per_task_grad_magnitude":  actor_conflict_metrics["per_task_grad_magnitude"],
-            "critic_pairwise_conflict": critic_conflict_metrics["pairwise_conflict"],
-            "critic_pairwise_cos_sim":  critic_conflict_metrics["pairwise_cos_sim"],
-            "critic_pairwise_angle":    critic_conflict_metrics["pairwise_angle"],
-            "actor_pairwise_conflict":  actor_conflict_metrics["pairwise_conflict"],
-            "actor_pairwise_cos_sim":   actor_conflict_metrics["pairwise_cos_sim"],
-            "actor_pairwise_angle":     actor_conflict_metrics["pairwise_angle"],
+            "critic_avg_cos_sim":                   critic_avg_cos_sim,
+            "critic_avg_grad_magnitude":             critic_avg_grad_magnitude,
+            "actor_avg_cos_sim":                     actor_avg_cos_sim,
+            "actor_avg_grad_magnitude":              actor_avg_grad_magnitude,
+            # Existing critic conflict metrics
+            "critic_conflict_rate":                  critic_conflict_metrics["conflict_rate"],
+            "critic_mean_conflict_magnitude":        critic_conflict_metrics["mean_conflict_magnitude"],
+            "critic_mean_conflict_angle":            critic_conflict_metrics["mean_conflict_angle"],
+            "critic_per_task_conflict_rate":         critic_conflict_metrics["per_task_conflict_rate"],
+            "critic_per_task_grad_magnitude":        critic_conflict_metrics["per_task_grad_magnitude"],
+            # Existing actor conflict metrics
+            "actor_conflict_rate":                   actor_conflict_metrics["conflict_rate"],
+            "actor_mean_conflict_magnitude":         actor_conflict_metrics["mean_conflict_magnitude"],
+            "actor_mean_conflict_angle":             actor_conflict_metrics["mean_conflict_angle"],
+            "actor_per_task_conflict_rate":          actor_conflict_metrics["per_task_conflict_rate"],
+            "actor_per_task_grad_magnitude":         actor_conflict_metrics["per_task_grad_magnitude"],
+            # Existing pairwise metrics
+            "critic_pairwise_conflict":              critic_conflict_metrics["pairwise_conflict"],
+            "critic_pairwise_cos_sim":               critic_conflict_metrics["pairwise_cos_sim"],
+            "critic_pairwise_angle":                 critic_conflict_metrics["pairwise_angle"],
+            "actor_pairwise_conflict":               actor_conflict_metrics["pairwise_conflict"],
+            "actor_pairwise_cos_sim":                actor_conflict_metrics["pairwise_cos_sim"],
+            "actor_pairwise_angle":                  actor_conflict_metrics["pairwise_angle"],
+            # New elementwise critic metrics
+            "critic_avg_interference_rate":          critic_conflict_metrics["avg_interference_rate"],
+            "critic_interference_asymmetry":         critic_conflict_metrics["interference_asymmetry"],
+            "critic_per_task_interference_in":       critic_conflict_metrics["per_task_interference_in"],
+            "critic_per_task_interference_out":      critic_conflict_metrics["per_task_interference_out"],
+            "critic_pairwise_interference_rate":     critic_conflict_metrics["pairwise_interference_rate"],
+            "critic_avg_participation_ratio":        critic_conflict_metrics["avg_participation_ratio"],
+            "critic_per_task_participation_ratio":   critic_conflict_metrics["per_task_participation_ratio"],
+            "critic_effective_rank":                 critic_conflict_metrics["effective_rank"],
+            # New elementwise actor metrics
+            "actor_avg_interference_rate":           actor_conflict_metrics["avg_interference_rate"],
+            "actor_interference_asymmetry":          actor_conflict_metrics["interference_asymmetry"],
+            "actor_per_task_interference_in":        actor_conflict_metrics["per_task_interference_in"],
+            "actor_per_task_interference_out":       actor_conflict_metrics["per_task_interference_out"],
+            "actor_pairwise_interference_rate":      actor_conflict_metrics["pairwise_interference_rate"],
+            "actor_avg_participation_ratio":         actor_conflict_metrics["avg_participation_ratio"],
+            "actor_per_task_participation_ratio":    actor_conflict_metrics["per_task_participation_ratio"],
+            "actor_effective_rank":                  actor_conflict_metrics["effective_rank"],
         }
-
 
     @jax.jit
     def _update_inner(self, data: ReplayBufferSamples) -> tuple[Self, LogDict]:
