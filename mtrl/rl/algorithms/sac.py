@@ -17,6 +17,8 @@ from flax.core import FrozenDict
 from flax.training.train_state import TrainState
 from jaxtyping import Array, Float, PRNGKeyArray
 
+from mtrl.config.networks import BroQConfig, BroActorConfig
+
 from mtrl.config.networks import ContinuousActionPolicyConfig, QValueFunctionConfig
 from mtrl.config.optim import OptimizerConfig
 from mtrl.config.rl import AlgorithmConfig, OffPolicyTrainingConfig
@@ -28,7 +30,7 @@ from mtrl.monitoring.metrics import (
     get_dormant_neuron_logs,
 )
 from mtrl.rl.buffers import ReplayBuffer
-from mtrl.rl.networks import ContinuousActionPolicy, Ensemble, QValueFunction
+from mtrl.rl.networks import ContinuousActionPolicy, Ensemble, QValueFunction, BRCActor, BRCCritic
 from mtrl.types import (
     Action,
     Intermediates,
@@ -120,33 +122,70 @@ class SAC(OffPolicyAlgorithm[SACConfig]):
             jax.random.split(master_key, 4)
         )
 
-        actor_net = ContinuousActionPolicy(
-            int(np.prod(env_config.action_space.shape)), config=config.actor_config
-        )
-        dummy_obs = jnp.array(
-            [env_config.observation_space.sample() for _ in range(config.num_tasks)]
-        )
-        actor = TrainState.create(
-            apply_fn=actor_net.apply,
-            params=actor_net.init(actor_init_key, dummy_obs),
-            tx=config.actor_config.network_config.optimizer.spawn(),
-        )
+
+        if isinstance(config.actor_config, BroActorConfig):
+            actor_net = BRCActor(
+                bro_config = config.actor_config.bro_config,
+                actor_config=config.actor_config.actor_config,
+                task_embed_config=config.actor_config.task_embed_config,
+                action_dim=int(np.prod(env_config.action_space.shape)),
+            )
+            dummy_obs = jnp.array(
+                [env_config.observation_space.sample() for _ in range(config.num_tasks)]
+            )
+            task_ids = jnp.arange(config.num_tasks)
+            actor = TrainState.create(
+                apply_fn=actor_net.apply,
+                params=actor_net.init(actor_init_key, dummy_obs, task_ids),
+               tx=config.actor_config.network_config.optimizer.spawn(),
+            )
+
+        else:
+            actor_net = ContinuousActionPolicy(
+                int(np.prod(env_config.action_space.shape)), config=config.actor_config
+            )
+            dummy_obs = jnp.array(
+                [env_config.observation_space.sample() for _ in range(config.num_tasks)]
+            )
+            actor = TrainState.create(
+                apply_fn=actor_net.apply,
+                params=actor_net.init(actor_init_key, dummy_obs),
+                tx=config.actor_config.network_config.optimizer.spawn(),
+            )
 
         print("Actor Arch:", jax.tree_util.tree_map(jnp.shape, actor.params))
         print("Actor Params:", sum(x.size for x in jax.tree.leaves(actor.params)))
 
-        critic_cls = partial(QValueFunction, config=config.critic_config)
-        critic_net = Ensemble(critic_cls, num=config.num_critics)
-        dummy_action = jnp.array(
-            [env_config.action_space.sample() for _ in range(config.num_tasks)]
-        )
-        critic_init_params = critic_net.init(critic_init_key, dummy_obs, dummy_action)
-        critic = CriticTrainState.create(
-            apply_fn=critic_net.apply,
-            params=critic_init_params,
-            target_params=critic_init_params,
-            tx=config.critic_config.network_config.optimizer.spawn(),
-        )
+
+        if isinstance(config.critic_config, BroConfig):
+            critic_cls = partial(BRCCritic, config=config.critic_config)
+            critic_net = Ensemble(critic_cls, num=config.num_critics)
+            dummy_action = jnp.array(
+                [env_config.action_space.sample() for _ in range(config.num_tasks)]
+            )
+            dummy_task_ids = jnp.arange(config.num_tasks)
+
+            critic_init_params = critic_net.init(critic_init_key, dummy_obs, dummy_action, dummy_task_ids)
+            critic = CriticTrainState.create(
+                apply_fn=critic_net.apply,
+                params=critic_init_params,
+                target_params=critic_init_params,
+                tx=config.critic_config.network_config.optimizer.spawn(),
+            )
+
+        else:
+            critic_cls = partial(QValueFunction, config=config.critic_config)
+            critic_net = Ensemble(critic_cls, num=config.num_critics)
+            dummy_action = jnp.array(
+                [env_config.action_space.sample() for _ in range(config.num_tasks)]
+            )
+            critic_init_params = critic_net.init(critic_init_key, dummy_obs, dummy_action)
+            critic = CriticTrainState.create(
+                apply_fn=critic_net.apply,
+                params=critic_init_params,
+                target_params=critic_init_params,
+                tx=config.critic_config.network_config.optimizer.spawn(),
+            )
 
         print("Critic Arch:", jax.tree_util.tree_map(jnp.shape, critic.params))
         print("Critic Params:", sum(x.size for x in jax.tree.leaves(critic.params)))

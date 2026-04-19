@@ -16,7 +16,7 @@ from mtrl.nn import get_nn_arch_for_config
 from mtrl.nn.distributions import TanhMultivariateNormalDiag
 from mtrl.nn.initializers import uniform
 
-from mtrl.config.nn import ImpalaEncoderConfig, TaskEmbeddingConfig
+from mtrl.config.nn import ImpalaEncoderConfig, TaskEmbeddingConfig, BroConfig
 
 class ContinuousActionPolicy(nn.Module):
     """A Flax module representing the policy network for continous action spaces."""
@@ -139,6 +139,43 @@ class ImpalaDQN(nn.Module):
             num_atoms=self.num_atoms,
             layernorm=True,
         )(x)
+
+class BRCCritic(nn.Module):
+    bro_config: BroConfig
+    q_function_config: QValueFunctionConfig
+    task_embed_config: TaskEmbeddingConfig
+    action_dim: int
+
+    @nn.compact
+    def __call__(self, states: jax.Array, actions: jax.Array, task_ids: jax.Array):
+        embedding = get_nn_arch_for_config(self.task_embed_config)(config=self.task_embed_config)(task_ids)
+        # embedding = get_nn_arch_for_config(self.task_embed_config)(task_ids)
+        # print(states, actions, embedding)
+
+        x = jnp.concatenate([states, actions, embedding], axis=-1)
+        x = get_nn_arch_for_config(self.bro_config)(x)
+        x = get_nn_arch_for_config(self.q_function_config)(x)
+
+        return x
+
+
+
+class BRCActor(nn.Module):
+    bro_config: BroConfig
+    actor_config: ContinuousActionPolicyConfig
+    task_embed_config: TaskEmbeddingConfig
+    action_dim: int
+
+    @nn.compact
+    def __call__(self, x: jax.Array, task_ids: jax.Array):
+        embedding = get_nn_arch_for_config(self.task_embed_config)(config=self.task_embed_config)(task_ids)
+
+        x = jnp.concatenate([x, embedding], axis=-1)
+        x = get_nn_arch_for_config(self.bro_config)(x)
+        x = ContinuousActionPolicy(config=self.actor_config, action_dim=self.action_dim)(x)
+        return x
+
+
 
 class ValueFunction(nn.Module):
     """A Flax module approximating a Q-Value function."""

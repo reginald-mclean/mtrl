@@ -4,13 +4,13 @@ from pathlib import Path
 import tyro
 
 
-from mtrl.config.networks import ContinuousActionPolicyConfig, QValueFunctionConfig
-from mtrl.config.nn import VanillaNetworkConfig
+from mtrl.config.networks import BroQConfig, BroActorConfig, QValueFunctionConfig, TaskEmbeddingConfig, ContinuousActionPolicyConfig
+from mtrl.config.nn import VanillaNetworkConfig, BroConfig
 from mtrl.config.optim import OptimizerConfig
 from mtrl.config.rl import OffPolicyTrainingConfig
 from mtrl.envs import HumanoidBenchConfig
 from mtrl.experiment import Experiment
-from mtrl.rl.algorithms import MTSACConfig
+from mtrl.rl.algorithms import MTSACConfig, SACConfig
 
 
 @dataclass(frozen=True)
@@ -32,22 +32,39 @@ def main() -> None:
 
     WIDTH = args.width
     num_tasks = 9
+    '''
+    @dataclass(frozen=True)
+class BroQConfig:
+    bro_config: BroConfig = BroConfig()
+    q_function_config: QValueFunctionConfig = QValueFunctionConfig(use_classification=True, num_atoms=101)
+    task_embed_config: TaskEmbeddingConfig = TaskEmbeddingConfig()
+
+
+@dataclass(frozen=True)
+class BroActorConfig:
+    bro_config: BroConfig = BroConfig()
+    actor_config: ContinuousActionPolicyConfig = ContinuousActionPolicyConfig()
+    task_embed_config: TaskEmbeddingConfig = TaskEmbeddingConfig()
+    '''
 
     experiment = Experiment(
         exp_name=f"humanoidbench-medium_width_{args.width}_norm_{args.l2_norm}",
         seed=args.seed,
         data_dir=args.data_dir,
         env=HumanoidBenchConfig('medium'),
-        algorithm=MTSACConfig(
+        algorithm=SACConfig(
             clip=False,
             num_tasks=9,
             gamma=0.99,
-            actor_config=ContinuousActionPolicyConfig(
-                network_config=VanillaNetworkConfig(
-                    width=WIDTH,
-                    #num_tasks=num_tasks,
-                    optimizer=OptimizerConfig(max_grad_norm=1.0) # max_grad_norm=1.0 if args.reward_func_version == 'v2' else None),
-                )
+            actor_config=BroActorConfig(
+                bro_config=BroConfig(),
+                actor_config=ContinuousActionPolicyConfig(
+                    network_config=VanillaNetworkConfig(
+                        width=WIDTH,
+                        #num_tasks=num_tasks,
+                    )
+                ),
+                task_embed_config=TaskEmbeddingConfig()
             ),
             critic_config=QValueFunctionConfig(
                 #use_classification=True,

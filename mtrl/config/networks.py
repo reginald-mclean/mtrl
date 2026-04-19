@@ -1,4 +1,4 @@
-from .nn import NeuralNetworkConfig, VanillaNetworkConfig, ImpalaEncoderConfig, TaskEmbeddingConfig
+from .nn import NeuralNetworkConfig, VanillaNetworkConfig, ImpalaEncoderConfig, TaskEmbeddingConfig, BroConfig
 from dataclasses import dataclass
 
 
@@ -37,7 +37,19 @@ class ValueFunctionConfig(QValueFunctionConfig): ...
 @dataclass(frozen=True)
 class ImpalaDQNConfig:
     impala_config: ImpalaEncoderConfig = ImpalaEncoderConfig()
-    q_function_config: QValueFunctionConfig = QValueFunctionConfig(use_classification=True, num_atoms=51)
+    q_function_config: QValueFunctionConfig = QValueFunctionConfig(use_classification=True, num_atoms=101)
     task_embed_config: TaskEmbeddingConfig = TaskEmbeddingConfig()
     use_layer_norm: bool = True
 
+@dataclass(frozen=True)
+class BroQConfig:
+    bro_config: BroConfig = BroConfig()
+    q_function_config: QValueFunctionConfig = QValueFunctionConfig(use_classification=True, num_atoms=101)
+    task_embed_config: TaskEmbeddingConfig = TaskEmbeddingConfig()
+
+
+@dataclass(frozen=True)
+class BroActorConfig:
+    bro_config: BroConfig = BroConfig()
+    actor_config: ContinuousActionPolicyConfig = ContinuousActionPolicyConfig()
+    task_embed_config: TaskEmbeddingConfig = TaskEmbeddingConfig()

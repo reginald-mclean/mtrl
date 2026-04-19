@@ -11,6 +11,8 @@ from .paco import PaCoNetwork
 from .soft_modules import SoftModularizationNetwork
 from .impala import ImpalaEncoder
 from .task_embedding import TaskEmbedding
+from .bro import BroNet
+
 from mtrl.config.networks import ImpalaDQNConfig
 
 def get_nn_arch_for_config(
@@ -30,6 +32,8 @@ def get_nn_arch_for_config(
         return MOORENetwork
     elif type(config) is mtrl.config.nn.VanillaNetworkConfig:
         return VanillaNetwork
+    elif type(config) is mtrl.config.nn.BroConfig:
+        return BroNet
     elif type(config) is mtrl.config.nn.ImpalaEncoderConfig:
         return ImpalaEncoder
     elif type(config) is mtrl.config.nn.TaskEmbeddingConfig:
