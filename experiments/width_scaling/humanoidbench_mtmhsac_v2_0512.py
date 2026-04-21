@@ -49,7 +49,7 @@ def main() -> None:
                 bro_config=BroConfig(
                     width=256,
                     num_blocks=1,
-                ), 
+                ),
                 task_embed_config=TaskEmbeddingConfig(num_tasks=num_tasks),
                 actor_config=ContinuousActionPolicyConfig(
                     network_config=VanillaNetworkConfig(
@@ -60,7 +60,7 @@ def main() -> None:
                 )
             ),
             critic_config=BroQConfig(
-                bro_config=BroConfig(),
+                bro_config=BroConfig(num_blocks=2, width=1024),
                 task_embed_config=TaskEmbeddingConfig(num_tasks=num_tasks),
                 q_function_config=QValueFunctionConfig(
                     num_atoms=101,

@@ -229,7 +229,6 @@ class MultiTaskReplayBuffer:
     rewards: Float[npt.NDArray, "buffer_size task 1"]
     next_obs: Float[Observation, "buffer_size task"]
     dones: Float[npt.NDArray, "buffer_size task 1"]
-    task_ids: Float[npt.NDArray, "buffer_size task"]
     pos: int
  
     def __init__(
@@ -536,18 +535,16 @@ class MultiTaskReplayBuffer:
                 mn = self._min_rewards[np.newaxis, :, np.newaxis]
                 mx = self._max_rewards[np.newaxis, :, np.newaxis]
                 rewards = (rewards - mn) / (mx - mn + self.reward_norm_eps)
- 
+
             batch = (
                 self.obs[sample_idx],
                 self.actions[sample_idx],
                 self.next_obs[sample_idx],
                 self.dones[sample_idx],
                 rewards,
-                np.argmax(self.obs[sample_idx][:, :, -self.num_tasks:], axis=2)
             )
             mt_batch_size = single_task_batch_size * self.num_tasks
             batch = map(lambda x: x.reshape(mt_batch_size, *x.shape[2:]), batch)
- 
         return ReplayBufferSamples(*batch)
 
 
@@ -870,7 +867,6 @@ class AtariMultiTaskReplayBuffer(MultiTaskReplayBuffer):
             size=(single_task_batch_size,),
         )
 
-        task_ids = np.repeat(np.arange(self.num_tasks), single_task_batch_size)
 
         rewards = self.rewards[sample_idx]
         if self.normalize_rewards:
@@ -886,7 +882,6 @@ class AtariMultiTaskReplayBuffer(MultiTaskReplayBuffer):
             self.truncations[sample_idx],
             self.dones[sample_idx],
             rewards,
-            task_ids,
         )
         mt_batch_size = single_task_batch_size * self.num_tasks
         batch = map(lambda x: x.reshape(mt_batch_size, *x.shape[2:]), batch)

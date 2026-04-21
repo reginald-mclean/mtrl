@@ -18,6 +18,7 @@ class BroBlock(nn.Module):
     @nn.compact
     def __call__(self, x):
         skip = x
+        self.sow("intermediates", f"bro_block_{self.block_num}_input", x)
         x = nn.Dense(self.output_size,
             name=f'dense_{self.block_num}_0',
             kernel_init=self.initializer,
@@ -26,6 +27,7 @@ class BroBlock(nn.Module):
         )(x)
         x = nn.LayerNorm()(x)
         x = nn.relu(x)
+        self.sow("intermediates", f"bro_block_{self.block_num}_dense_ln_relu", x)
         x = nn.Dense(self.output_size,
             name=f'dense_{self.block_num}_1',
             kernel_init=self.initializer,
@@ -34,6 +36,7 @@ class BroBlock(nn.Module):
         )(x)
         x = nn.LayerNorm()(x)
         x = x + skip
+        self.sow("intermediates", f"bro_block_{self.block_num}_dense_ln_skip", x)
         return x
 
 
@@ -50,6 +53,7 @@ class BroNet(nn.Module):
         x = self.layer_norm(x)
         x = nn.relu(x)
 
+        self.sow("intermediates", f"bro_block_input_dense_ln_relu", x)
         for b in self.blocks:
             x = b(x)
 

@@ -266,8 +266,8 @@ class OffPolicyAlgorithm(
                     self, network_metrics = self.get_metrics(
                         config.compute_network_metrics, metrics_data
                     )
-  
-                    # self, update_logs = self.compute_weights(metrics_data)
+                    # print(network_metrics)
+                    self, update_logs = self.compute_weights(metrics_data)
 
                     if track:
                         wandb.log(update_logs, step=total_steps)

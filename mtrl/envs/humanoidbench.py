@@ -104,8 +104,9 @@ def evaluation(
     def eval_done(returns):
         return all(len(r) >= num_episodes for r in returns.values())
 
+    task_ids = np.arange(eval_envs.num_envs)
     while not eval_done(episodic_returns):
-        actions = agent.eval_action(obs)
+        actions = agent.eval_action(obs, task_ids)
         obs, _, terminations, truncations, infos = eval_envs.step(actions)
 
         dones = np.logical_or(terminations, truncations)

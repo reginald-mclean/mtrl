@@ -355,6 +355,7 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
         key, critic_loss_key = jax.random.split(self.key)
         if self.critic_network_type == 'c51':
             # --- C51 distributional critic update ---
+            task_ids = jnp.argmax(data.observations[..., -self.num_tasks :], axis=1)
             if self.actor_network_type == 'vanilla':
                 next_actions, next_action_log_probs = self.actor.apply_fn(
                     self.actor.params, data.next_observations
@@ -366,11 +367,11 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
 
             elif self.actor_network_type == 'bro':
                 next_actions, next_action_log_probs = self.actor.apply_fn(
-                    self.actor.params, data.next_observations, data.task_ids
+                    self.actor.params, data.next_observations, task_ids
                 ).sample_and_log_prob(seed=critic_loss_key)
 
                 target_logits = self.critic.apply_fn(
-                    self.critic.target_params, data.next_observations, next_actions, data.task_ids
+                    self.critic.target_params, data.next_observations, next_actions, task_ids
                 )  # [num_critics, batch, n_atoms]
 
             support = jnp.linspace(self.v_min, self.v_max, self.n_atoms)
@@ -401,9 +402,8 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
             def critic_loss_c51(
                 params: FrozenDict,
             ) -> tuple[Float[Array, ""], Float[Array, ""]]:
-                
                 online_logits = self.critic.apply_fn(
-                    params, data.observations, data.actions, # data.task_ids
+                    params, data.observations, data.actions, task_ids
                 )  # [num_critics, batch, n_atoms]
                 log_probs = jax.nn.log_softmax(online_logits, axis=-1)
                 if task_weights is not None:
@@ -459,8 +459,9 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
                     self.actor.params, data.next_observations
                 ).sample_and_log_prob(seed=critic_loss_key)
             elif self.actor_network_type == 'bro':
+                task_ids = jnp.argmax(data.observations[..., -self.num_tasks :], axis=1)
                 next_actions, next_action_log_probs = self.actor.apply_fn(
-                    self.actor.params, data.next_observations, data.task_ids
+                    self.actor.params, data.next_observations, task_ids
                 ).sample_and_log_prob(seed=critic_loss_key)
             q_values = self.critic.apply_fn(
                 self.critic.target_params, data.next_observations, next_actions
@@ -566,13 +567,14 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
             _task_weights: Float[Array, "batch 1"] | None = None,
             _explore: bool = True
         ):
+            task_ids = jnp.argmax(_data.observations[..., -self.num_tasks :], axis=1)
             if self.actor_network_type == 'vanilla':
                 action_samples, log_probs = self.actor.apply_fn(
                     params, _data.observations
                 ).sample_and_log_prob(seed=actor_loss_key)
             elif self.actor_network_type == 'bro':
                 action_samples, log_probs = self.actor.apply_fn(
-                    params, _data.observations, _data.task_ids
+                    params, _data.observations, task_ids
                 ).sample_and_log_prob(seed=actor_loss_key)
 
 
@@ -580,7 +582,7 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
 
             if self.critic_network_type == 'c51':
                 logits = self.critic.apply_fn(
-                    self.critic.params, _data.observations, action_samples, # _data.task_ids
+                    self.critic.params, _data.observations, action_samples, task_ids
                 )
                 support = jnp.linspace(self.v_min, self.v_max, self.n_atoms)
                 q_values = jnp.sum(jax.nn.softmax(logits, axis=-1) * support, axis=-1)  # [num_critics, batch]
@@ -662,7 +664,7 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
 
     @jax.jit
     def compute_weights(self, data: ReplayBufferSamples) -> tuple[Self, LogDict]:
-        task_ids = data.observations[..., -self.num_tasks :]
+        task_ids = data.observations[...,-self.num_tasks:]
         alpha_vals = self.alpha.apply_fn(self.alpha.params, task_ids)
         if self.use_task_weights:
             task_weights = extract_task_weights(self.alpha.params, task_ids)
@@ -679,6 +681,8 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
             else (None, None)
         )
 
+        task_ids = split_data.observations[:, :,-self.num_tasks:]
+
         # --- Critic ---
         key, critic_loss_key = jax.random.split(self.key)
         self = self.replace(key=key)
@@ -688,11 +692,11 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
             delta_z = (self.v_max - self.v_min) / (self.n_atoms - 1)
 
             def critic_loss_c51(
-                params, _data, _alpha_val, _task_weights=None
+                params, _data, _alpha_val, task_ids, _task_weights=None
             ):
                 if self.actor_network_type == 'bro':
                     next_actions, next_action_log_probs = self.actor.apply_fn(
-                        self.actor.params, _data.next_observations, _data.task_ids
+                        self.actor.params, _data.next_observations, jnp.argmax(task_ids, axis=1)
                     ).sample_and_log_prob(seed=critic_loss_key)
                 else:
                     next_actions, next_action_log_probs = self.actor.apply_fn(
@@ -700,7 +704,7 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
                     ).sample_and_log_prob(seed=critic_loss_key)
 
                 target_logits = self.critic.apply_fn(
-                    self.critic.target_params, _data.next_observations, next_actions, _data.task_ids
+                    self.critic.target_params, _data.next_observations, next_actions, jnp.argmax(task_ids, axis=1)
                 )
                 target_probs = jax.nn.softmax(target_logits, axis=-1)
                 expected_Q = jnp.sum(target_probs * support, axis=-1)
@@ -722,7 +726,7 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
                 m = jax.lax.stop_gradient(m)
 
                 online_logits = self.critic.apply_fn(
-                    params, _data.observations, _data.actions, _data.task_ids
+                    params, _data.observations, _data.actions, jnp.argmax(task_ids, axis=1)
                 )
                 log_probs = jax.nn.log_softmax(online_logits, axis=-1)
                 if _task_weights is not None:
@@ -733,12 +737,13 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
 
             _, critic_grads = jax.vmap(
                 jax.value_and_grad(critic_loss_c51),
-                in_axes=(None, 0, 0, 0),
+                in_axes=(None, 0, 0, 0, 0),
                 out_axes=0,
             )(
                 self.critic.params,
                 split_data,
                 split_alpha_vals,
+                task_ids,
                 split_task_weights,
             )
         else:
@@ -793,13 +798,13 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
         key, actor_loss_key = jax.random.split(self.key)
         self = self.replace(key=key)
 
-        def actor_loss(params, _data, _alpha_val, _task_weights=None):
+        def actor_loss(params, _data, _alpha_val, task_ids, _task_weights=None):
             action_samples, log_probs = self.actor.apply_fn(
-                params, _data.observations
+                params, _data.observations, jnp.argmax(task_ids, axis=1)
             ).sample_and_log_prob(seed=actor_loss_key)
             log_probs = log_probs.reshape(-1, 1)
             q_values = self.critic.apply_fn(
-                self.critic.params, _data.observations, action_samples
+                self.critic.params, _data.observations, action_samples, jnp.argmax(task_ids, axis=1)
             )
             min_qf_values = jnp.min(q_values, axis=0)
             if _task_weights is not None:
@@ -810,9 +815,9 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
 
         (_, _), actor_grads = jax.vmap(
             jax.value_and_grad(actor_loss, has_aux=True),
-            in_axes=(None, 0, 0, 0),
+            in_axes=(None, 0, 0, 0, 0),
             out_axes=0,
-        )(self.actor.params, split_data, split_alpha_vals, split_task_weights)
+        )(self.actor.params, split_data, split_alpha_vals, task_ids, split_task_weights)
 
         flat_actor_grads = jax.vmap(
             lambda x: jax.flatten_util.ravel_pytree(x)[0]
@@ -960,23 +965,26 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
     ) -> tuple[Self, Intermediates, Intermediates]:
         key, critic_activations_key = jax.random.split(self.key, 2)
 
+        task_ids = jnp.argmax(data.observations[..., -self.num_tasks :], axis=1)
         actions_dist: distrax.Distribution
         batch_size = data.observations.shape[0]
+
         actions_dist, actor_state = self.actor.apply_fn(
-            self.actor.params, data.observations, mutable="intermediates"
+            self.actor.params, data.observations, task_ids, mutable="intermediates"
         )
         actions = actions_dist.sample(seed=critic_activations_key)
 
         _, critic_state = self.critic.apply_fn(
-            self.critic.params, data.observations, actions, mutable="intermediates"
+            self.critic.params, data.observations, actions, task_ids, mutable="intermediates"
         )
 
         actor_intermediates = jax.tree.map(
             lambda x: x.reshape(batch_size, -1), actor_state["intermediates"]
         )
+
         critic_intermediates = jax.tree.map(
             lambda x: x.reshape(self.num_critics, batch_size, -1),
-            critic_state["intermediates"]["VmapQValueFunction_0"],
+            critic_state["intermediates"]["VmapBRCCritic_0"],
         )
 
         self = self.replace(key=key)
