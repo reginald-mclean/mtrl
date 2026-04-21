@@ -41,23 +41,29 @@ def main() -> None:
             clip=False,
             num_tasks=10,
             gamma=0.99,
+            v_min=-10.0,
+            v_max=10.0,
+            n_atoms=101,
             actor_config=ContinuousActionPolicyConfig(
                 network_config=MultiHeadConfig(
                     width=WIDTH,
                     num_tasks=10,
-                    optimizer=OptimizerConfig() # max_grad_norm=1.0 if args.reward_func_version == 'v2' else None),
+                    optimizer=OptimizerConfig(max_grad_norm=1.0) #  if args.reward_func_version == 'v2' else None),
                 )
             ),
             critic_config=QValueFunctionConfig(
+                use_classification=False, # True,
+                num_atoms=101,
                 network_config=MultiHeadConfig(
                     width=WIDTH,
                     num_tasks=10,
-                    optimizer=OptimizerConfig() #max_grad_norm=1.0 if args.reward_func_version == 'v2' else None),
+                    optimizer=OptimizerConfig(max_grad_norm=1.0) #  if args.reward_func_version == 'v2' else None),
                 )
             ),
             num_critics=2,
         ),
         training_config=OffPolicyTrainingConfig(
+            returns_normalization=True,
             total_steps=int(2e7),
             buffer_size=int(1e6),
             batch_size=1280,

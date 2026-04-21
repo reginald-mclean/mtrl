@@ -33,6 +33,8 @@ class ReplayBufferSamples(NamedTuple):
     next_observations: Float[Observation, " batch"]
     dones: Float[np.ndarray, "batch 1"]
     rewards: Float[np.ndarray, "batch 1"]
+    task_ids: Float[np.ndarray, " batch"]
+
 
 class AtariReplayBufferSamples(NamedTuple):
     observations: npt.NDArray[np.uint8]

@@ -41,6 +41,8 @@ class TrainingConfig:
     state_coverage:bool = False
     normalize_rewards: bool = False
 
+    returns_normalization: bool = False
+
 @dataclass(frozen=True)
 class OffPolicyTrainingConfig(TrainingConfig):
     warmstart_steps: int = int(4e3)

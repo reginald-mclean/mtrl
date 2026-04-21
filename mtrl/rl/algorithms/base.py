@@ -112,6 +112,7 @@ class OffPolicyAlgorithm(
             sigma=config.reward_filter_sigma,
             delta=config.reward_filter_delta,
             filter_mode=config.reward_filter_mode,
+            returns_normalization=config.returns_normalization,
         )
 
     @override
@@ -141,6 +142,7 @@ class OffPolicyAlgorithm(
             episodes_ended = checkpoint_metadata["episodes_ended"]
             last_eval_episodes = episodes_ended
 
+
         replay_buffer = self.spawn_replay_buffer(env_config, config, seed)
         if buffer_checkpoint is not None:
             replay_buffer.load_checkpoint(buffer_checkpoint)
@@ -154,7 +156,7 @@ class OffPolicyAlgorithm(
             if global_step < config.warmstart_steps and type(env_config) is not AtariConfig:
                 actions = envs.action_space.sample()
             else:
-                if type(env_config) is not AtariConfig:
+                if type(env_config) is MetaworldConfig:
                     self, actions = self.sample_action(obs)
                 else:
                     self, actions_jax = self.sample_action(obs, task_ids)
@@ -264,8 +266,8 @@ class OffPolicyAlgorithm(
                     self, network_metrics = self.get_metrics(
                         config.compute_network_metrics, metrics_data
                     )
-
-                    self, update_logs = self.compute_weights(metrics_data)
+  
+                    # self, update_logs = self.compute_weights(metrics_data)
 
                     if track:
                         wandb.log(update_logs, step=total_steps)

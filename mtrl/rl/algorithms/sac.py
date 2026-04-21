@@ -76,6 +76,22 @@ def _eval_action(
 ) -> Float[Array, "... action_dim"]:
     return actor.apply_fn(actor.params, observation).mode()
 
+@jax.jit
+def _sample_action_bro(
+    actor: TrainState, observation: Observation, task_ids: jax.Array, key: PRNGKeyArray
+) -> tuple[Float[Array, "... action_dim"], PRNGKeyArray]:
+    key, action_key = jax.random.split(key)
+    dist = actor.apply_fn(actor.params, observation, task_ids)
+    action = dist.sample(seed=action_key)
+    return action, key
+
+
+@jax.jit
+def _eval_action_bro(
+    actor: TrainState, observation: Observation, task_ids: jax.Array
+) -> Float[Array, "... action_dim"]:
+    return actor.apply_fn(actor.params, observation, task_ids).mode()
+
 
 @dataclasses.dataclass(frozen=True)
 class SACConfig(AlgorithmConfig):
@@ -96,6 +112,7 @@ class SAC(OffPolicyAlgorithm[SACConfig]):
     tau: float = struct.field(pytree_node=False)
     target_entropy: float = struct.field(pytree_node=False)
     num_critics: int = struct.field(pytree_node=False)
+    actor_network_type: str = struct.field(pytree_node=False)
 
     def spawn_replay_buffer(  # pyright: ignore[reportIncompatibleMethodOverride]
         self, env_config: EnvConfig, config: OffPolicyTrainingConfig, seed: int = 1
@@ -122,7 +139,7 @@ class SAC(OffPolicyAlgorithm[SACConfig]):
             jax.random.split(master_key, 4)
         )
 
-
+        actor_network_type = 'vanilla'
         if isinstance(config.actor_config, BroActorConfig):
             actor_net = BRCActor(
                 bro_config = config.actor_config.bro_config,
@@ -133,12 +150,16 @@ class SAC(OffPolicyAlgorithm[SACConfig]):
             dummy_obs = jnp.array(
                 [env_config.observation_space.sample() for _ in range(config.num_tasks)]
             )
+
             task_ids = jnp.arange(config.num_tasks)
-            actor = TrainState.create(
-                apply_fn=actor_net.apply,
-                params=actor_net.init(actor_init_key, dummy_obs, task_ids),
-               tx=config.actor_config.network_config.optimizer.spawn(),
-            )
+
+            with jax.disable_jit():
+                actor = TrainState.create(
+                    apply_fn=actor_net.apply,
+                    params=actor_net.init(actor_init_key, dummy_obs, task_ids),
+                    tx=config.actor_config.actor_config.network_config.optimizer.spawn(),
+                )
+            actor_network_type = 'bro'
 
         else:
             actor_net = ContinuousActionPolicy(
@@ -157,7 +178,7 @@ class SAC(OffPolicyAlgorithm[SACConfig]):
         print("Actor Params:", sum(x.size for x in jax.tree.leaves(actor.params)))
 
 
-        if isinstance(config.critic_config, BroConfig):
+        if isinstance(config.critic_config, BroQConfig):
             critic_cls = partial(BRCCritic, config=config.critic_config)
             critic_net = Ensemble(critic_cls, num=config.num_critics)
             dummy_action = jnp.array(
@@ -209,6 +230,7 @@ class SAC(OffPolicyAlgorithm[SACConfig]):
             tau=config.tau,
             target_entropy=target_entropy,
             num_critics=config.num_critics,
+            actor_network_type=actor_network_type,
         )
 
     def reset(self, env_mask) -> None:
@@ -224,14 +246,19 @@ class SAC(OffPolicyAlgorithm[SACConfig]):
         }
 
     @override
-    def sample_action(self, observation: Observation) -> tuple[Self, Action]:
-        action, key = _sample_action(self.actor, observation, self.key)
+    def sample_action(self, observation: Observation, task_ids: jax.Array = None) -> tuple[Self, Action]:
+        if self.actor_network_type == 'vanilla':
+            action, key = _sample_action(self.actor, observation, self.key)
+        elif self.actor_network_type == 'bro':
+            action, key = _sample_action_bro(self.actor, observation, task_ids, self.key)
         return self.replace(key=key), jax.device_get(action)
 
     @override
-    def eval_action(self, observations: Observation) -> Action:
-        return jax.device_get(_eval_action(self.actor, observations))
-
+    def eval_action(self, observations: Observation, task_ids: jax.Array = None) -> Action:
+        if self.actor_network_type == 'vanilla':
+            return jax.device_get(_eval_action(self.actor, observations))
+        elif self.actor_network_type == 'bro':
+            return jax.device_get(_eval_action_bro(self.actor, observations, task_ids))
     @jax.jit
     def _update_inner(self, data: ReplayBufferSamples) -> tuple[Self, LogDict]:
         # --- Critic loss ---

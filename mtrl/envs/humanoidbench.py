@@ -13,6 +13,7 @@ from mtrl.types import Agent
 
 from .base import EnvConfig
 
+from metaworld.wrappers import OneHotWrapper
 
 @dataclass(frozen=True)
 class HumanoidBenchConfig(EnvConfig):
@@ -30,8 +31,8 @@ class HumanoidBenchConfig(EnvConfig):
     @override
     def observation_space(self) -> gym.Space:
         return gym.spaces.Box(
-            np.array([-np.inf]*51, dtype=np.float32),
-            np.array([np.inf]*51, dtype=np.float32),
+            np.array([-np.inf]*60, dtype=np.float32),
+            np.array([np.inf]*60, dtype=np.float32),
         )
     @override
     def evaluate(
@@ -43,13 +44,25 @@ class HumanoidBenchConfig(EnvConfig):
     @override
     def spawn_eval(self, seed: int = 1) -> gym.vector.VectorEnv:
         names = ['walk', 'stand', 'run', 'stair', 'crawl', 'pole', 'slide', 'hurdle', 'maze']
-        env_fns = [lambda : gym.wrappers.RecordEpisodeStatistics(gym.make(f'h1-{name}-v0')) for name in names]
+        env_fns = [lambda : gym.wrappers.RecordEpisodeStatistics(
+                OneHotWrapper(
+                    gym.make(f'h1-{name}-v0'), 
+                    idx, 
+                    len(names),
+                )
+            ) for idx, name in enumerate(names)]
         return gym.vector.SyncVectorEnv(env_fns)
 
     @override
     def spawn(self, seed: int = 1) -> gym.vector.VectorEnv:
         names = ['walk', 'stand', 'run', 'stair', 'crawl', 'pole', 'slide', 'hurdle', 'maze']
-        env_fns = [lambda : gym.wrappers.RecordEpisodeStatistics(gym.make(f'h1-{name}-v0')) for name in names]
+        env_fns = [lambda : gym.wrappers.RecordEpisodeStatistics(
+                OneHotWrapper(
+                    gym.make(f'h1-{name}-v0'), 
+                    idx, 
+                    len(names),
+                )
+            ) for idx, name in enumerate(names)]
         return gym.vector.SyncVectorEnv(env_fns)
 
 

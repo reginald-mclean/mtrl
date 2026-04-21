@@ -194,7 +194,7 @@ class ReplayBuffer:
         else:
             # Uniform sampling - same batch size for each task (original behavior)
             assert batch_size % self.num_tasks == 0, \
-                "Batch size must be divisible by the number of tasks."
+                f"Batch size must be divisible by the number of tasks. batch: {batch_size}, num tasks: {self.num_tasks}"
             single_task_batch_size = batch_size // self.num_tasks
             sample_idx = self._rng.integers(
                 low=0,
@@ -216,20 +216,22 @@ class ReplayBuffer:
 
         return ReplayBufferSamples(*batch)
 
+
 class MultiTaskReplayBuffer:
     """Replay buffer for the multi-task benchmarks.
-
+ 
     Each sampling step, it samples a batch for each task, returning a batch of shape (batch_size, num_tasks,).
     When pushing samples to the buffer, the buffer only accepts inputs with batch shape (num_tasks,).
     """
-
+ 
     obs: Float[Observation, "buffer_size task"]
     actions: Float[Action, "buffer_size task"]
     rewards: Float[npt.NDArray, "buffer_size task 1"]
     next_obs: Float[Observation, "buffer_size task"]
     dones: Float[npt.NDArray, "buffer_size task 1"]
+    task_ids: Float[npt.NDArray, "buffer_size task"]
     pos: int
-
+ 
     def __init__(
         self,
         total_capacity: int,
@@ -245,6 +247,10 @@ class MultiTaskReplayBuffer:
         alpha: float | None = None,
         delta: float | None = None,
         filter_mode: str | None = None,
+        # ── new: return-based normalization ──────────────────────
+        returns_normalization: bool = False,
+        discount: float = 0.99,
+        v_max: float = 10.0,
     ) -> None:
         assert (
             total_capacity % num_tasks == 0
@@ -255,15 +261,35 @@ class MultiTaskReplayBuffer:
         self._obs_shape = np.array(env_obs_space.shape).prod()
         self._action_shape = np.array(env_action_space.shape).prod()
         self.full = False
-
+ 
         self.normalize_rewards = normalize_rewards
-
         self._min_rewards = np.full(num_tasks, np.inf, dtype=np.float64)
         self._max_rewards = np.full(num_tasks, -np.inf, dtype=np.float64)
         self.reward_norm_eps = reward_norm_eps
-
+ 
+        # ── return-based normalization state ─────────────────────
+        # Separate flag so both modes can coexist without confusion.
+        # When use_return_normalization=True, sample() uses return-based
+        # normalization instead of the per-step min-max approach.
+        self.use_return_normalization = returns_normalization
+        self.discount = discount
+        self.v_max = v_max
+        self.effective_horizon = 1.0 / (1.0 - discount)
+ 
+        # Running min/max of observed *discounted returns* per task.
+        # Initialised to ±inf so the first episode always updates them.
+        self._returns_min = np.full(num_tasks, np.inf,  dtype=np.float64)
+        self._returns_max = np.full(num_tasks, -np.inf, dtype=np.float64)
+ 
+        # Per-task reward accumulators for the in-progress episode.
+        # We collect raw rewards step-by-step and compute the return
+        # backwards when the episode ends.
+        self._episode_rewards: list[list[float]] = [[] for _ in range(num_tasks)]
+ 
         self.reset()
-
+ 
+    # ── existing methods unchanged ────────────────────────────────
+ 
     def reset(self):
         """Reinitialize the buffer."""
         self.obs = np.zeros(
@@ -278,7 +304,7 @@ class MultiTaskReplayBuffer:
         )
         self.dones = np.zeros((self.capacity, self.num_tasks, 1), dtype=np.float32)
         self.pos = 0
-
+ 
     def checkpoint(self) -> ReplayBufferCheckpoint:
         return {
             "data": {
@@ -289,32 +315,114 @@ class MultiTaskReplayBuffer:
                 "dones": self.dones,
                 "pos": self.pos,
                 "full": self.full,
+                # persist normalization state so a resumed run doesn't
+                # lose the return statistics it already computed
+                "returns_min": self._returns_min,
+                "returns_max": self._returns_max,
             },
             "rng_state": self._rng.__getstate__(),
         }
-
+ 
     def load_checkpoint(self, ckpt: ReplayBufferCheckpoint) -> None:
         for key in ["data", "rng_state"]:
             assert key in ckpt
-
         for key in ["obs", "actions", "rewards", "next_obs", "dones", "pos", "full"]:
             assert key in ckpt["data"]
             setattr(self, key, ckpt["data"][key])
-
+        # restore normalization stats if present (backwards-compatible)
+        self._returns_min = ckpt["data"].get("returns_min", self._returns_min)
+        self._returns_max = ckpt["data"].get("returns_max", self._returns_max)
         self._rng.__setstate__(ckpt["rng_state"])
-
+ 
     def _advance_position(self, steps: int) -> None:
-        """Advance the write pointer and update the full flag when wrapping."""
-
         if steps <= 0:
             return
-
         new_pos = self.pos + steps
         if new_pos >= self.capacity:
             self.full = True
-
         self.pos = new_pos % self.capacity
-
+ 
+    # ── new: return normalizer helpers ───────────────────────────
+ 
+    def _compute_discounted_returns(
+        self,
+        rewards: np.ndarray,   # (T,) raw rewards for one episode
+        truncated: bool,
+    ) -> tuple[float, float]:
+        """
+        Compute discounted return for every timestep in the episode,
+        then return the (min, max) over those values.
+ 
+        If the episode was truncated (time limit, not true terminal),
+        we bootstrap the tail with mean_reward * effective_horizon
+        instead of 0 — same approach as BRO.
+        """
+        T = len(rewards)
+        values = np.zeros(T, dtype=np.float64)
+        bootstrap = float(rewards.mean()) * self.effective_horizon if truncated else 0.0
+        for i in reversed(range(T)):
+            values[i] = rewards[i] + self.discount * bootstrap
+            bootstrap  = values[i]
+        return float(values.min()), float(values.max())
+ 
+    def _update_return_stats(
+        self,
+        rewards: np.ndarray,    # (num_tasks,) reward at this step
+        terminal: np.ndarray,   # (num_tasks,) bool
+        truncated: np.ndarray,  # (num_tasks,) bool
+    ) -> None:
+        """
+        Accumulate per-task rewards and, when an episode ends, compute
+        the discounted return and update the running min/max.
+        Called inside add() when use_return_normalization is True.
+        """
+        for task_idx in range(self.num_tasks):
+            self._episode_rewards[task_idx].append(float(rewards[task_idx]))
+ 
+            done = bool(terminal[task_idx]) or bool(truncated[task_idx])
+            if done:
+                ep_rewards = np.array(self._episode_rewards[task_idx], dtype=np.float64)
+                v_min, v_max = self._compute_discounted_returns(
+                    ep_rewards, truncated=bool(truncated[task_idx])
+                )
+                self._returns_min[task_idx] = min(self._returns_min[task_idx], v_min)
+                self._returns_max[task_idx] = max(self._returns_max[task_idx], v_max)
+                self._episode_rewards[task_idx] = []   # reset for next episode
+ 
+    def _normalize_rewards_by_return(self, rewards: np.ndarray) -> np.ndarray:
+        """
+        Scale rewards so that observed discounted returns map to [-v_max, v_max].
+ 
+        denominator = max(|returns_min|, returns_max) / v_max
+ 
+        Dividing rewards by this denominator means:
+            normalized_return = raw_return / denominator
+                              ≈ raw_return * v_max / max_observed_return
+        which keeps returns within [-v_max, v_max] by construction.
+ 
+        Falls back to per-step min-max if return stats aren't available yet
+        (i.e. no episode has completed).
+        """
+        no_data = np.isinf(self._returns_min) | np.isinf(self._returns_max)
+ 
+        # denominator shape: (num_tasks,)
+        denominator = np.where(
+            self._returns_max >= np.abs(self._returns_min),
+            self._returns_max,
+            np.abs(self._returns_min),
+        )
+        denominator = denominator / self.v_max
+ 
+        # avoid divide-by-zero on tasks with no completed episode yet
+        denominator = np.where(no_data | (denominator < self.reward_norm_eps),
+                               1.0, denominator)
+ 
+        # rewards shape coming in: (sample, num_tasks, 1)
+        # denominator needs to broadcast to that shape
+        return rewards / denominator[np.newaxis, :, np.newaxis]
+ 
+    # ── add: wire in return stat tracking ────────────────────────
+ 
     def add(
         self,
         obs: Float[Observation, " task"],
@@ -322,9 +430,15 @@ class MultiTaskReplayBuffer:
         action: Float[Action, " task"],
         reward: Float[npt.NDArray, " task"],
         done: Float[npt.NDArray, " task"],
+        # ── new optional args for return normalization ──────────
+        terminal: Float[npt.NDArray, " task"] | None = None,
+        truncated: Float[npt.NDArray, " task"] | None = None,
     ) -> None:
-        """Add a batch of samples to the buffer."""
-        # NOTE: assuming batch dim = task dim
+        """Add a batch of samples to the buffer.
+ 
+        terminal and truncated are only needed when use_return_normalization=True.
+        If not provided, done is treated as terminal (truncated=False).
+        """
         assert (
             obs.ndim == 2 and action.ndim == 2 and reward.ndim <= 2 and done.ndim <= 2
         )
@@ -335,29 +449,39 @@ class MultiTaskReplayBuffer:
             == done.shape[0]
             == self.num_tasks
         )
-
-        self.obs[self.pos] = obs.copy()
+ 
+        self.obs[self.pos]     = obs.copy()
         self.actions[self.pos] = action.copy()
         self.next_obs[self.pos] = next_obs.copy()
-        self.dones[self.pos] = done.copy().reshape(-1, 1)
+        self.dones[self.pos]   = done.copy().reshape(-1, 1)
         self.rewards[self.pos] = reward.reshape(-1, 1).copy()
-
+ 
+        # original per-step min-max tracking (unchanged)
         if self.normalize_rewards:
             self._min_rewards = np.minimum(self._min_rewards, reward)
             self._max_rewards = np.maximum(self._max_rewards, reward)
-
+ 
+        # new: trajectory return tracking
+        if self.use_return_normalization:
+            _terminal  = terminal  if terminal  is not None else done
+            _truncated = truncated if truncated is not None else np.zeros_like(done)
+            self._update_return_stats(
+                reward.flatten(),
+                _terminal.flatten().astype(bool),
+                _truncated.flatten().astype(bool),
+            )
+ 
         self._advance_position(1)
-
-
+ 
+    # ── sample: swap in return-based normalization ────────────────
+ 
     def single_task_sample(self, task_idx: int, batch_size: int) -> ReplayBufferSamples:
         assert task_idx < self.num_tasks, "Task index out of bounds."
-
         sample_idx = self._rng.integers(
             low=0,
             high=max(self.pos if not self.full else self.capacity, batch_size),
             size=(batch_size,),
         )
-
         batch = (
             self.obs[sample_idx][task_idx],
             self.actions[sample_idx][task_idx],
@@ -365,94 +489,68 @@ class MultiTaskReplayBuffer:
             self.dones[sample_idx][task_idx],
             self.rewards[sample_idx][task_idx],
         )
-
         return ReplayBufferSamples(*batch)
-
-    def sample(
-        self,
-        batch_size: int | np.ndarray,
-    ) -> ReplayBufferSamples:
-        """Sample a batch with optional per-task batch size control.
-
-        Args:
-            batch_size: The total batch size. Must be divisible by number of tasks
-                       if per_task_batch_sizes is None.
-            per_task_batch_sizes: Optional array of shape [num_tasks] specifying
-                                 how many samples to draw from each task.
-                                 If provided, must sum to batch_size.
-
-        Returns:
-            ReplayBufferSamples: A batch of samples of batch shape (batch_size,).
-        """
+ 
+    def sample(self, batch_size: int | np.ndarray) -> ReplayBufferSamples:
         buffer_size = self.pos if not self.full else self.capacity
         if isinstance(batch_size, np.ndarray):
-            # Adaptive sampling - different batch sizes per task
-            assert len(batch_size) == self.num_tasks, \
-                f"batch_size length ({len(batch_size)}) must equal num_tasks ({self.num_tasks})"
-            assert batch_size.sum() == (128 * self.num_tasks), \
-                f"per_task_batch_sizes must sum to batch_size ({batch_size}), got {batch_size.sum()}"
-            # Sample different amounts from each task
-            all_obs = []
-            all_actions = []
-            all_next_obs = []
-            all_dones = []
-            all_rewards = []
+            assert len(batch_size) == self.num_tasks
+            assert batch_size.sum() == (128 * self.num_tasks)
+            all_obs, all_actions, all_next_obs, all_dones, all_rewards = [], [], [], [], []
             for task_idx in range(self.num_tasks):
                 task_batch_size = batch_size[task_idx]
                 if task_batch_size > 0:
-                    # Sample indices for this task
                     sample_idx = self._rng.integers(
                         low=0,
-                        high=max(
-                            self.pos if not self.full else self.capacity, task_batch_size
-                        ),
+                        high=max(self.pos if not self.full else self.capacity, task_batch_size),
                         size=(task_batch_size,),
                     )
-                    # Gather samples for this task
                     all_obs.append(self.obs[sample_idx, task_idx])
                     all_actions.append(self.actions[sample_idx, task_idx])
                     all_next_obs.append(self.next_obs[sample_idx, task_idx])
                     all_dones.append(self.dones[sample_idx, task_idx])
                     all_rewards.append(self.rewards[sample_idx, task_idx])
-            # Concatenate all task samples
             batch = (
-                np.concatenate(all_obs, axis=0),
+                np.concatenate(all_obs,     axis=0),
                 np.concatenate(all_actions, axis=0),
                 np.concatenate(all_next_obs, axis=0),
-                np.concatenate(all_dones, axis=0),
+                np.concatenate(all_dones,   axis=0),
                 np.concatenate(all_rewards, axis=0),
             )
         else:
-            # Uniform sampling - same batch size for each task (original behavior)
-            assert batch_size % self.num_tasks == 0, \
-                "Batch size must be divisible by the number of tasks."
+            assert batch_size % self.num_tasks == 0
             single_task_batch_size = batch_size // self.num_tasks
             sample_idx = self._rng.integers(
                 low=0,
-                high=max(
-                self.pos if not self.full else self.capacity, single_task_batch_size
-                ),
+                high=max(self.pos if not self.full else self.capacity, single_task_batch_size),
                 size=(single_task_batch_size,),
             )
-
-            rewards = self.rewards[sample_idx]
-            if self.normalize_rewards:
-                # Per-task min-max normalization (shape: [sample, task, 1])
+ 
+            rewards = self.rewards[sample_idx]   # (sample, num_tasks, 1)
+ 
+            if self.use_return_normalization:
+                # ── new: scale rewards so returns fit in [-v_max, v_max]
+                rewards = self._normalize_rewards_by_return(rewards)
+            elif self.normalize_rewards:
+                # original per-step min-max normalization (unchanged)
                 mn = self._min_rewards[np.newaxis, :, np.newaxis]
                 mx = self._max_rewards[np.newaxis, :, np.newaxis]
                 rewards = (rewards - mn) / (mx - mn + self.reward_norm_eps)
-
+ 
             batch = (
                 self.obs[sample_idx],
                 self.actions[sample_idx],
                 self.next_obs[sample_idx],
                 self.dones[sample_idx],
                 rewards,
+                np.argmax(self.obs[sample_idx][:, :, -self.num_tasks:], axis=2)
             )
             mt_batch_size = single_task_batch_size * self.num_tasks
             batch = map(lambda x: x.reshape(mt_batch_size, *x.shape[2:]), batch)
-
+ 
         return ReplayBufferSamples(*batch)
+
+
 
 class MultiTaskRolloutBuffer:
     num_rollout_steps: int

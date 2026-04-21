@@ -25,7 +25,7 @@ class BroBlock(nn.Module):
             use_bias=True,
         )(x)
         x = nn.LayerNorm()(x)
-        x = nn.Relu()(x)
+        x = nn.relu(x)
         x = nn.Dense(self.output_size,
             name=f'dense_{self.block_num}_1',
             kernel_init=self.initializer,
@@ -41,11 +41,13 @@ class BroNet(nn.Module):
     config: BroConfig
 
     def setup(self):
-        self.blocks = [BroBlock(output_size=self.config.width, block_num=x) for x in self.config.num_blocks]
+        self.blocks = [BroBlock(output_size=self.config.width, block_num=x) for x in range(self.config.num_blocks)]
+        self.dense = nn.Dense(self.config.width, kernel_init=nn.initializers.xavier_uniform(), bias_init=nn.initializers.zeros)
+        self.layer_norm = nn.LayerNorm()
 
     def __call__(self, x):
-        x = nn.Dense(self.config.width, kernel_init=nn.initializers.xavier_uniform(), bias_init=nn.initializers.zeros)(x)
-        x = nn.LayerNorm()(x)
+        x = self.dense(x)
+        x = self.layer_norm(x)
         x = nn.relu(x)
 
         for b in self.blocks:

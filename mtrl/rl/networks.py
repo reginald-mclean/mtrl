@@ -66,8 +66,17 @@ class QValueFunction(nn.Module):
                 head_bias_init=uniform(3e-3),
             )(x)
         else:
+            if action is not None:
+                x = jnp.concatenate((action, state), axis=-1)
+                return get_nn_arch_for_config(self.config.network_config)(
+                    config=self.config.network_config,
+                    head_dim=self.config.num_atoms,
+                    head_kernel_init=uniform(3e-3),
+                    head_bias_init=uniform(3e-3),
+                )(x)
             assert self.action_dim is not None, 'Need to pass action_dim to QValueFunction'
-            if False: #not self.config.dueling:
+            if not self.config.dueling:
+                print(self.config)
                 return get_nn_arch_for_config(self.config.network_config)(
                     config=self.config.network_config,
                     head_dim=self.config.num_atoms * self.action_dim,
@@ -144,17 +153,17 @@ class BRCCritic(nn.Module):
     bro_config: BroConfig
     q_function_config: QValueFunctionConfig
     task_embed_config: TaskEmbeddingConfig
-    action_dim: int
 
     @nn.compact
     def __call__(self, states: jax.Array, actions: jax.Array, task_ids: jax.Array):
         embedding = get_nn_arch_for_config(self.task_embed_config)(config=self.task_embed_config)(task_ids)
-        # embedding = get_nn_arch_for_config(self.task_embed_config)(task_ids)
-        # print(states, actions, embedding)
 
         x = jnp.concatenate([states, actions, embedding], axis=-1)
-        x = get_nn_arch_for_config(self.bro_config)(x)
-        x = get_nn_arch_for_config(self.q_function_config)(x)
+        x = get_nn_arch_for_config(self.bro_config)(self.bro_config)(x)
+        if self.q_function_config.use_classification:
+            x = nn.Dense(self.q_function_config.num_atoms)(x)
+        else:
+            x = nn.Dense(1)(x)
 
         return x
 
@@ -171,7 +180,7 @@ class BRCActor(nn.Module):
         embedding = get_nn_arch_for_config(self.task_embed_config)(config=self.task_embed_config)(task_ids)
 
         x = jnp.concatenate([x, embedding], axis=-1)
-        x = get_nn_arch_for_config(self.bro_config)(x)
+        x = get_nn_arch_for_config(self.bro_config)(self.bro_config)(x)
         x = ContinuousActionPolicy(config=self.actor_config, action_dim=self.action_dim)(x)
         return x
 

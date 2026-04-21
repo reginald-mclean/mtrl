@@ -32,53 +32,48 @@ def main() -> None:
 
     WIDTH = args.width
     num_tasks = 9
-    '''
-    @dataclass(frozen=True)
-class BroQConfig:
-    bro_config: BroConfig = BroConfig()
-    q_function_config: QValueFunctionConfig = QValueFunctionConfig(use_classification=True, num_atoms=101)
-    task_embed_config: TaskEmbeddingConfig = TaskEmbeddingConfig()
-
-
-@dataclass(frozen=True)
-class BroActorConfig:
-    bro_config: BroConfig = BroConfig()
-    actor_config: ContinuousActionPolicyConfig = ContinuousActionPolicyConfig()
-    task_embed_config: TaskEmbeddingConfig = TaskEmbeddingConfig()
-    '''
 
     experiment = Experiment(
         exp_name=f"humanoidbench-medium_width_{args.width}_norm_{args.l2_norm}",
         seed=args.seed,
         data_dir=args.data_dir,
         env=HumanoidBenchConfig('medium'),
-        algorithm=SACConfig(
+        algorithm=MTSACConfig(
             clip=False,
-            num_tasks=9,
+            num_tasks=num_tasks,
             gamma=0.99,
+            v_min=-10.0,
+            v_max=10.0,
+            n_atoms=101,
             actor_config=BroActorConfig(
-                bro_config=BroConfig(),
+                bro_config=BroConfig(
+                    width=256,
+                    num_blocks=1,
+                ), 
+                task_embed_config=TaskEmbeddingConfig(num_tasks=num_tasks),
                 actor_config=ContinuousActionPolicyConfig(
                     network_config=VanillaNetworkConfig(
                         width=WIDTH,
-                        #num_tasks=num_tasks,
-                    )
-                ),
-                task_embed_config=TaskEmbeddingConfig()
+                        depth=1,
+                        optimizer=OptimizerConfig(max_grad_norm=1.0) #  if args.reward_func_version == 'v2' else None),
+                     )
+                )
             ),
-            critic_config=QValueFunctionConfig(
-                #use_classification=True,
-                #num_atoms=101,
-                network_config=VanillaNetworkConfig(
-                    width=WIDTH,
-                    #num_tasks=num_tasks,
-                    optimizer=OptimizerConfig(max_grad_norm=1.0) #max_grad_norm=1.0 if args.reward_func_version == 'v2' else None),
+            critic_config=BroQConfig(
+                bro_config=BroConfig(),
+                task_embed_config=TaskEmbeddingConfig(num_tasks=num_tasks),
+                q_function_config=QValueFunctionConfig(
+                    num_atoms=101,
+                    network_config=VanillaNetworkConfig(
+                        width=WIDTH,
+                        optimizer=OptimizerConfig(max_grad_norm=1.0) #  if args.reward_func_version == 'v2' else None),
+                    )
                 )
             ),
             num_critics=2,
         ),
         training_config=OffPolicyTrainingConfig(
-            normalize_rewards=True,
+            returns_normalization=True,
             total_steps=int(2_000_000 * num_tasks),
             buffer_size=int(100_000 * num_tasks),
             batch_size=int(128*num_tasks),
