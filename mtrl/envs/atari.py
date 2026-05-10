@@ -103,7 +103,8 @@ def make_atari_env(
     env = gym.make(
         ale_id,
         frameskip=1,           # AtariPreprocessing handles skipping
-        repeat_action_probability=0.25,
+        repeat_action_probability=0,
+        max_num_frames_per_episode=27_000,
         full_action_space=True,
         render_mode=None,
     )
@@ -111,24 +112,24 @@ def make_atari_env(
     # AtariPreprocessing: noop_max, frame_skip, grayscale, scale_obs (False → uint8)
     env = AtariPreprocessing(
         env,
-        noop_max=30,
-        frame_skip=4,
+    )  #noop_max=30,
+    '''    frame_skip=4,
         screen_size=obs_size,
-        terminal_on_life_loss=not eval_mode,  # EpisodicLife for training
+        terminal_on_life_loss=False, # not eval_mode,  # EpisodicLife for training
         grayscale_obs=True,
         grayscale_newaxis=False,
         scale_obs=False,          # keep uint8, encoder normalises
-    )
+    )'''
 
-    if not eval_mode:
-        # Clip rewards to {-1, 0, +1} during training
-        env = TransformReward(env, np.sign)
+    #if not eval_mode:
+    #    # Clip rewards to {-1, 0, +1} during training
+    #    env = TransformReward(env, np.sign)
 
     # Frame stacking: produces (frame_stack, H, W) tensor of uint8
     env = FrameStackObservation(env, frame_stack)
 
     # Time limit
-    env = gym.wrappers.TimeLimit(env, max_episode_steps=max_episode_steps // 4)
+    #env = gym.wrappers.TimeLimit(env, max_episode_steps=max_episode_steps // 4)
     env = gym.wrappers.RecordEpisodeStatistics(env)
     env.reset(seed=seed)
     return env
@@ -153,6 +154,8 @@ def evaluation(
 
     task_ids = np.arange(eval_envs.num_envs)
 
+
+    count = 0
     while not eval_done(episodic_returns):
         actions = agent.eval_action(obs, task_ids)
         obs, _, terminations, truncations, infos = eval_envs.step(actions)
@@ -165,6 +168,10 @@ def evaluation(
                 episodic_returns[task_names[i]].append(
                     float(infos["episode"]["r"][i])
                 )
+        count += 1
+        if count % 1000 == 0:
+            print(count, [str(len(r)) + '/' + str(num_episodes) for r in episodic_returns.values()])
+
 
     human_scores = get_human_scores()
     random_scores = get_random_scores()
@@ -179,7 +186,7 @@ def evaluation(
         task_name: (mean_return - random_scores[task_name]) / (human_scores[task_name] - random_scores[task_name])
         for task_name, mean_return in mean_return_per_task.items()
     }
-    mean_hns = float(np.median(list(hns_per_task.values())))
+    mean_hns = float(np.mean(list(hns_per_task.values())))
 
     return mean_returns, mean_hns, mean_return_per_task, hns_per_task
 

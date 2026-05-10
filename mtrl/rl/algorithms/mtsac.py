@@ -353,6 +353,8 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
         task_weights: Float[Array, "*batch 1"] | None = None,
     ) -> tuple[Self, LogDict]:
         key, critic_loss_key = jax.random.split(self.key)
+        print(self.actor_network_type, self.critic_network_type) 
+
         if self.critic_network_type == 'c51':
             # --- C51 distributional critic update ---
             task_ids = jnp.argmax(data.observations[..., -self.num_tasks :], axis=1)
@@ -406,10 +408,13 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
                     params, data.observations, data.actions, task_ids
                 )  # [num_critics, batch, n_atoms]
                 log_probs = jax.nn.log_softmax(online_logits, axis=-1)
+                print(log_probs.shape, online_logits.shape)
                 if task_weights is not None:
                     loss = -(task_weights.reshape(1, -1, 1) * m * log_probs).sum(axis=-1).mean()
                 else:
                     loss = -(m * log_probs).sum(axis=-1).mean()
+                    print(loss)
+
                 q_vals = jnp.sum(jax.nn.softmax(online_logits, axis=-1) * support, axis=-1)
                 return loss, q_vals.mean()
 
@@ -417,6 +422,10 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
                 critic_loss_c51, has_aux=True
             )(self.critic.params)
             flat_grads, _ = flatten_util.ravel_pytree(critic_grads)
+
+
+            print(critic_loss_value, qf_values)
+            exit(0)
 
             key, optimizer_key = jax.random.split(key)
             critic = self.critic.apply_gradients(
@@ -871,7 +880,7 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
             "actor_effective_rank":                  actor_conflict_metrics["effective_rank"],
         }
 
-    @jax.jit
+    #@jax.jit
     def _update_inner(self, data: ReplayBufferSamples) -> tuple[Self, LogDict]:
         task_ids = data.observations[..., -self.num_tasks :]
 

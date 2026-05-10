@@ -18,7 +18,6 @@ class BroBlock(nn.Module):
     @nn.compact
     def __call__(self, x):
         skip = x
-        self.sow("intermediates", f"bro_block_{self.block_num}_input", x)
         x = nn.Dense(self.output_size,
             name=f'dense_{self.block_num}_0',
             kernel_init=self.initializer,

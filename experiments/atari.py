@@ -30,7 +30,7 @@ def main() -> None:
     num_tasks = 26
 
     experiment = Experiment(
-        exp_name=f"atari_26_games_dueling_dqn_augmentation_updates_eval_envs_scale_{args.scale}",
+        exp_name=f"atari_26_games_dueling_dqn_augmentation_updates_eval_envs_scale_mean_hns_{args.scale}",
         seed=args.seed,
         data_dir=args.data_dir,
         env=AtariConfig(),
@@ -56,7 +56,8 @@ def main() -> None:
         training_config=DrQTrainingConfig(
             total_steps=num_tasks*int(1e5),
             normalize_rewards=args.normalize_rewards,
-            buffer_size=int(num_tasks*10_000)
+            buffer_size=int(num_tasks*100_000),
+            evaluation_frequency=int(10),
         ),
         checkpoint=False,
         resume=args.resume,

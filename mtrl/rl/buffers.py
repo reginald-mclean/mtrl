@@ -16,6 +16,7 @@ from mtrl.types import (
 )
 from scipy.ndimage import gaussian_filter1d
 
+import traceback
 
 class ReplayBuffer:
     """Replay buffer for the single-task environments.
@@ -875,6 +876,8 @@ class AtariMultiTaskReplayBuffer(MultiTaskReplayBuffer):
             mx = self._max_rewards[np.newaxis, :, np.newaxis]
             rewards = (rewards - mn) / (mx - mn + self.reward_norm_eps)
 
+        task_ids = np.repeat(np.arange(self.num_tasks), single_task_batch_size)
+
         batch = (
             self.obs[sample_idx],
             self.actions[sample_idx],
@@ -882,6 +885,8 @@ class AtariMultiTaskReplayBuffer(MultiTaskReplayBuffer):
             self.truncations[sample_idx],
             self.dones[sample_idx],
             rewards,
+            task_ids
+
         )
         mt_batch_size = single_task_batch_size * self.num_tasks
         batch = map(lambda x: x.reshape(mt_batch_size, *x.shape[2:]), batch)
@@ -939,4 +944,336 @@ class AtariMultiTaskReplayBuffer(MultiTaskReplayBuffer):
             np.concatenate(all_dones).astype(np.float32),
             np.concatenate(all_rewards).astype(np.float32),
             np.concatenate(all_task_ids).astype(np.int32),
+        )
+
+class MemoryEfficientAtariMultiTaskReplayBuffer(MultiTaskReplayBuffer):
+    """Multi-task Atari replay buffer.
+
+    Memory layout
+    -------------
+    A single ``obs`` array of shape ``(capacity, num_tasks, *obs_shape)`` stores
+    both observations and next-observations.  On each ``add()`` call:
+      - ``obs`` is written at ``pos``
+      - ``next_obs`` is written at ``(pos + nstep) % capacity``
+
+    At sample time ``next_obs`` is recovered as ``obs[(idx + nstep) % capacity]``
+    with no extra storage or reconstruction.  This matches the reference
+    MemoryEfficientReplayBuffer with ``input_is_stacked=True``.
+    """
+
+    obs: Float[Observation, "buffer_size task"]
+    actions: Float[Action, "buffer_size task"]
+    rewards: Float[npt.NDArray, "buffer_size task 1"]
+    truncates: Float[npt.NDArray, "buffer_size task 1"]
+    dones: Float[npt.NDArray, "buffer_size task 1"]
+    pos: int
+
+    def __init__(
+        self,
+        total_capacity: int,
+        num_tasks: int,
+        env_obs_space: gym.Space,
+        env_action_space: gym.Space,
+        seed: int | None = None,
+        max_steps: int = 500,
+        reward_filter: str | None = None,
+        sigma: float | None = None,
+        alpha: float | None = None,
+        delta: float | None = None,
+        filter_mode: str | None = None,
+        normalize_rewards: bool = False,
+        reward_norm_eps: float = 1e-8,
+        nstep: int = 3,
+        gamma: float = 0.99,
+    ) -> None:
+        assert (
+            total_capacity % num_tasks == 0
+        ), "Total capacity must be divisible by the number of tasks."
+        self.capacity = total_capacity // num_tasks
+        self.num_tasks = num_tasks
+        self._rng = np.random.default_rng(seed)
+        self._obs_space = env_obs_space
+        self.normalize_rewards = normalize_rewards
+        self.reward_norm_eps   = reward_norm_eps
+        self.nstep  = nstep
+        self.gamma  = gamma
+
+        obs_shape = env_obs_space.shape
+
+        # ------------------------------------------------------------------
+        # N-step ring buffer — pre-allocated, no deque of Python objects.
+        # ------------------------------------------------------------------
+        self._ns_obs       = np.zeros((nstep, num_tasks, *obs_shape), dtype=np.uint8)
+        self._ns_next_obs  = np.zeros((nstep, num_tasks, *obs_shape), dtype=np.uint8)
+        self._ns_actions   = np.zeros((nstep, num_tasks),             dtype=np.int32)
+        self._ns_rewards   = np.zeros((nstep, num_tasks),             dtype=np.float32)
+        self._ns_truncates = np.zeros((nstep, num_tasks),             dtype=np.float32)
+        self._ns_dones     = np.zeros((nstep, num_tasks),             dtype=np.float32)
+
+        self._ns_pos   = 0
+        self._ns_count = 0
+
+        # Scratch arrays for _get_nstep_info — zero heap alloc per call
+        self._scratch_reward   = np.zeros(num_tasks, dtype=np.float32)
+        self._scratch_done     = np.zeros(num_tasks, dtype=np.float32)
+        self._scratch_next_obs = np.zeros((num_tasks, *obs_shape), dtype=np.uint8)
+        self._scratch_mask     = np.zeros(num_tasks, dtype=bool)
+
+        # Per-task min-max reward normalisation
+        self._min_rewards = np.full(num_tasks, np.inf,  dtype=np.float64)
+        self._max_rewards = np.full(num_tasks, -np.inf, dtype=np.float64)
+
+        self.reset()
+
+    # ------------------------------------------------------------------
+    # Initialisation
+    # ------------------------------------------------------------------
+
+    def reset(self):
+        """Allocate the main circular buffer arrays."""
+        obs_shape = self._obs_space.shape
+        # Single array holds both obs and next_obs — next_obs lives nstep ahead
+        self.obs         = np.zeros((self.capacity, self.num_tasks, *obs_shape), dtype=np.uint8)
+        self.actions     = np.zeros((self.capacity, self.num_tasks),             dtype=np.int32)
+        self.rewards     = np.zeros((self.capacity, self.num_tasks, 1),          dtype=np.float32)
+        self.dones       = np.zeros((self.capacity, self.num_tasks, 1),          dtype=np.float32)
+        self.truncations = np.zeros((self.capacity, self.num_tasks, 1),          dtype=np.float32)
+        self.pos  = 0
+        self.full = False
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _get_nstep_info(self):
+        """Compute n-step returns from the pre-allocated ring buffer."""
+        nstep  = self.nstep
+        oldest = self._ns_pos  # ring full => oldest == next write slot
+
+        obs_0    = self._ns_obs[oldest]
+        action_0 = self._ns_actions[oldest]
+        trunc_0  = self._ns_truncates[oldest]
+
+        newest = (self._ns_pos - 1) % nstep
+        np.copyto(self._scratch_reward,   self._ns_rewards[newest])
+        np.copyto(self._scratch_done,     self._ns_dones[newest])
+        np.copyto(self._scratch_next_obs, self._ns_next_obs[newest])
+
+        for k in range(1, nstep):
+            idx    = (self._ns_pos - 1 - k) % nstep
+            rew_i  = self._ns_rewards[idx]
+            done_i = self._ns_dones[idx]
+
+            self._scratch_reward *= self.gamma
+            self._scratch_reward *= (1.0 - done_i)
+            self._scratch_reward += rew_i
+
+            np.greater(done_i, 0.0, out=self._scratch_mask)
+            if self._scratch_mask.any():
+                np.copyto(
+                    self._scratch_next_obs,
+                    self._ns_next_obs[idx],
+                    where=self._scratch_mask[:, np.newaxis, np.newaxis, np.newaxis],
+                )
+                np.copyto(self._scratch_done, done_i, where=self._scratch_mask)
+
+        return obs_0, action_0, self._scratch_reward, trunc_0, self._scratch_done, self._scratch_next_obs
+
+    def _sample_indices(self, n: int) -> np.ndarray:
+        """Draw n valid buffer indices, excluding the unsafe wrap-around zone.
+
+        Mirrors generate_excluded_random from the reference: excludes a window
+        of nstep+6 slots around the write pointer to ensure both the implicit
+        next_obs slot (nstep ahead) and a small safety margin are always valid.
+        """
+        if not self.full:
+            high = max(self.pos - self.nstep, 1)
+            return self._rng.integers(0, high, size=(n,))
+
+        # Exclude [pos, pos+nstep+6) % capacity — matches reference's guard window
+        guard = self.nstep + 6
+        excluded = set(int((self.pos + k) % self.capacity) for k in range(guard))
+        valid = np.array(
+            [i for i in range(self.capacity) if i not in excluded],
+            dtype=np.int64,
+        )
+        return valid[self._rng.integers(0, len(valid), size=(n,))]
+
+    # ------------------------------------------------------------------
+    # Input coercion
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _coerce(
+        name: str,
+        value,
+        dtype: np.dtype,
+        expected_leading_dim: int,
+    ) -> np.ndarray:
+        """Ensure *value* is a contiguous numpy array of the right dtype."""
+        if not isinstance(value, np.ndarray):
+            try:
+                value = np.asarray(value, dtype=dtype)
+            except Exception as exc:
+                raise TypeError(
+                    f"add(): '{name}' could not be converted to a numpy array: {exc}"
+                ) from exc
+        elif value.dtype != dtype:
+            value = value.astype(dtype, copy=False)
+
+        if not value.flags["C_CONTIGUOUS"]:
+            value = np.ascontiguousarray(value)
+
+        if value.shape[0] != expected_leading_dim:
+            raise ValueError(
+                f"add(): '{name}' has leading dim {value.shape[0]}, "
+                f"expected {expected_leading_dim} (num_tasks)."
+            )
+        return value
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def add(
+        self,
+        obs,
+        next_obs,
+        action,
+        reward,
+        truncate,
+        done,
+    ) -> None:
+        obs      = self._coerce("obs",      obs,      np.uint8,   self.num_tasks)
+        next_obs = self._coerce("next_obs", next_obs, np.uint8,   self.num_tasks)
+        action   = self._coerce("action",   action,   np.int32,   self.num_tasks)
+        reward   = self._coerce("reward",   reward,   np.float32, self.num_tasks)
+        truncate = self._coerce("truncate", truncate, np.float32, self.num_tasks)
+        done     = self._coerce("done",     done,     np.float32, self.num_tasks)
+
+        slot = self._ns_pos
+        np.copyto(self._ns_obs[slot],      obs)
+        np.copyto(self._ns_next_obs[slot], next_obs)
+        np.copyto(self._ns_actions[slot],  action)
+        self._ns_rewards[slot]   = reward.reshape(-1)
+        self._ns_truncates[slot] = truncate.reshape(-1)
+        self._ns_dones[slot]     = done.reshape(-1)
+
+        self._ns_pos   = (slot + 1) % self.nstep
+        self._ns_count = min(self._ns_count + 1, self.nstep)
+
+        if self._ns_count < self.nstep:
+            return
+
+        n_obs, n_action, n_reward, n_truncate, n_done, n_next_obs = self._get_nstep_info()
+
+        p = self.pos
+        # Write obs at pos and next_obs at (pos + nstep) % capacity —
+        # both land in the single obs array, matching the reference layout
+        np.copyto(self.obs[p],                                   n_obs)
+        np.copyto(self.obs[(p + self.nstep) % self.capacity],    n_next_obs)
+        self.actions[p]     = n_action
+        self.rewards[p]     = n_reward.reshape(-1, 1)
+        self.dones[p]       = n_done.reshape(-1, 1)
+        self.truncations[p] = n_truncate.reshape(-1, 1)
+
+        if self.normalize_rewards:
+            np.minimum(self._min_rewards, n_reward, out=self._min_rewards)
+            np.maximum(self._max_rewards, n_reward, out=self._max_rewards)
+
+        self.pos = (p + 1) % self.capacity
+        if self.pos == 0:
+            self.full = True
+
+    def sample(
+        self,
+        batch_size: int,
+    ) -> AtariReplayBufferSamples:
+        """Sample a balanced batch (equal samples per task).
+
+        Args:
+            batch_size: Total batch size, must be divisible by num_tasks.
+
+        Returns:
+            AtariReplayBufferSamples of shape (batch_size,).
+        """
+        assert batch_size % self.num_tasks == 0, \
+            "Batch size must be divisible by the number of tasks."
+
+        single_task_batch_size = batch_size // self.num_tasks
+        sample_idx = self._sample_indices(single_task_batch_size)
+        next_idx   = (sample_idx + self.nstep) % self.capacity
+
+        rewards = self.rewards[sample_idx].copy()
+        if self.normalize_rewards:
+            mn = self._min_rewards[np.newaxis, :, np.newaxis]
+            mx = self._max_rewards[np.newaxis, :, np.newaxis]
+            rewards -= mn
+            rewards /= (mx - mn + self.reward_norm_eps)
+
+        task_ids      = np.repeat(np.arange(self.num_tasks), single_task_batch_size)
+        mt_batch_size = batch_size
+
+        def _flatten(arr):
+            return arr.reshape(mt_batch_size, *arr.shape[2:])
+
+        return AtariReplayBufferSamples(
+            _flatten(self.obs[sample_idx]),
+            _flatten(self.actions[sample_idx]),
+            _flatten(self.obs[next_idx]),        # next_obs lives nstep ahead in same array
+            _flatten(self.truncations[sample_idx]),
+            _flatten(self.dones[sample_idx]),
+            _flatten(rewards),
+            task_ids,
+        )
+
+    def sample_unbalanced(
+        self,
+        batch_size: int,
+    ) -> AtariReplayBufferSamples:
+        """Sample with Dirichlet-weighted unbalanced task proportions."""
+        weights    = self._rng.dirichlet([1] * self.num_tasks)
+        task_sizes = np.floor(weights * batch_size).astype(np.int32)
+        remainder  = batch_size - task_sizes.sum()
+        if remainder > 0:
+            task_sizes[np.argsort(-weights)[:remainder]] += 1
+
+        obs_shape = self._obs_space.shape
+
+        out_obs         = np.empty((batch_size, *obs_shape), dtype=np.uint8)
+        out_actions     = np.empty((batch_size,),            dtype=np.int32)
+        out_next_obs    = np.empty((batch_size, *obs_shape), dtype=np.uint8)
+        out_truncations = np.empty((batch_size, 1),          dtype=np.float32)
+        out_dones       = np.empty((batch_size, 1),          dtype=np.float32)
+        out_rewards     = np.empty((batch_size, 1),          dtype=np.float32)
+        out_task_ids    = np.empty((batch_size,),            dtype=np.int32)
+
+        cursor = 0
+        for i in range(self.num_tasks):
+            n = task_sizes[i]
+            if n == 0:
+                continue
+            sl  = slice(cursor, cursor + n)
+            idx = self._sample_indices(n)
+            nxt = (idx + self.nstep) % self.capacity
+
+            out_obs[sl]         = self.obs[idx, i]
+            out_next_obs[sl]    = self.obs[nxt, i]   # next_obs from same array
+            out_actions[sl]     = self.actions[idx, i]
+            out_truncations[sl] = self.truncations[idx, i]
+            out_dones[sl]       = self.dones[idx, i]
+            out_task_ids[sl]    = i
+
+            r = self.rewards[idx, i]
+            if self.normalize_rewards:
+                r = r.copy()
+                r -= self._min_rewards[i]
+                r /= (self._max_rewards[i] - self._min_rewards[i] + self.reward_norm_eps)
+            out_rewards[sl] = r
+
+            cursor += n
+
+        return AtariReplayBufferSamples(
+            out_obs, out_actions, out_next_obs,
+            out_truncations, out_dones, out_rewards, out_task_ids,
         )

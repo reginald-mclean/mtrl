@@ -24,7 +24,7 @@ from mtrl.config.utils import Metrics
 from mtrl.envs import EnvConfig
 from mtrl.envs.atari import AtariConfig
 from mtrl.envs.metaworld import MetaworldConfig
-from mtrl.rl.buffers import MultiTaskReplayBuffer, MultiTaskRolloutBuffer, AtariMultiTaskReplayBuffer
+from mtrl.rl.buffers import MultiTaskReplayBuffer, MultiTaskRolloutBuffer, AtariMultiTaskReplayBuffer, MemoryEfficientAtariMultiTaskReplayBuffer
 
 from mtrl.types import (
     Action,
@@ -38,6 +38,11 @@ from mtrl.types import (
     Rollout,
     Value,
 )
+
+import gc
+from memory_profiler import profile
+
+from mtrl.nn.augmentation import augment
 
 AlgorithmConfigType = TypeVar("AlgorithmConfigType", bound=AlgorithmConfig)
 TrainingConfigType = TypeVar("TrainingConfigType", bound=TrainingConfig)
@@ -166,6 +171,7 @@ class OffPolicyAlgorithm(
 
             done = np.logical_or(terminations, truncations)
 
+            rewards = np.sign(rewards)
             buffer_obs = next_obs
             if "final_obs" in infos:
                 buffer_obs = np.where(
@@ -207,20 +213,28 @@ class OffPolicyAlgorithm(
                 # Update the agent with data (replay_ratio iterations)
                 replay_ratio = getattr(config, 'replay_ratio', 1)
                 for _ in range(replay_ratio):
-                    if isinstance(replay_buffer, AtariMultiTaskReplayBuffer):
+                    if isinstance(replay_buffer, MemoryEfficientAtariMultiTaskReplayBuffer): # AtariMultiTaskReplayBuffer):
                         data = replay_buffer.sample_unbalanced(config.batch_size)
                     else:
                         data = replay_buffer.sample(config.batch_size)
                     self, logs = self.update(data)
                     if track:
-                        wandb.log(logs, step=total_steps)
+                        cpu_logs = jax.device_get(logs)
+                        scalar_logs = {
+                            k: v.item() if hasattr(v, "item") else v 
+                            for k, v in cpu_logs.items()
+                        }
+                        wandb.log(scalar_logs, step=total_steps)
+
+                        del logs
+                        del scalar_logs
 
                 # Logging
                 if global_step % 10000 == 0:
                     sps_steps = (global_step - start_step) * envs.num_envs
                     sps = int(sps_steps / (time.time() - start_time))
                     print("SPS:", sps)
-                    print(logs)
+                    #print(logs)
                 # Evaluation
                 eval_step_freq = getattr(config, 'eval_step_frequency', 0)
                 if eval_step_freq > 0:
@@ -263,17 +277,17 @@ class OffPolicyAlgorithm(
 
                     # Sample balanced data for metrics/weights (requires equal per-task sizes)
                     metrics_data = replay_buffer.sample(envs.num_envs * 128)
-                    self, network_metrics = self.get_metrics(
-                        config.compute_network_metrics, metrics_data
-                    )
+                    #self, network_metrics = self.get_metrics(
+                    #    config.compute_network_metrics, metrics_data
+                    #)
                     # print(network_metrics)
                     self, update_logs = self.compute_weights(metrics_data)
 
                     if track:
                         wandb.log(update_logs, step=total_steps)
 
-                    if track:
-                        wandb.log(network_metrics, step=total_steps)
+                    #if track:
+                    #    wandb.log(network_metrics, step=total_steps)
 
                     # Checkpointing
                     if checkpoint_manager is not None:
@@ -299,7 +313,8 @@ class OffPolicyAlgorithm(
                         )
 
                     # Reset envs again to exit eval mode
-                    obs, _ = envs.reset()
+                    if not eval_envs:
+                        obs, _ = envs.reset()
         return self
 
 

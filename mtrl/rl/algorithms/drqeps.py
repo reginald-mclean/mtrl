@@ -27,7 +27,7 @@ from mtrl.monitoring.metrics import (
     extract_activations,
     get_dormant_neuron_logs,
 )
-from mtrl.rl.buffers import AtariMultiTaskReplayBuffer
+from mtrl.rl.buffers import MemoryEfficientAtariMultiTaskReplayBuffer as AtariMultiTaskReplayBuffer
 from mtrl.rl.networks import ImpalaDQN
 from mtrl.types import (
     Action,
@@ -150,6 +150,10 @@ class DrQ(OffPolicyAlgorithm[DrQConfig]):
             [env_config.observation_space.sample() for _ in range(config.num_tasks)],
             dtype=jnp.uint8
         )
+
+        dummy_obs = jnp.transpose(dummy_obs, (0, 2, 3, 1))
+
+        print(f'dummy_obs shape: {dummy_obs.shape}')
 
         task_ids = jnp.arange(config.num_tasks)
 
@@ -351,6 +355,15 @@ class DrQ(OffPolicyAlgorithm[DrQConfig]):
         B = data.observations.shape[0]
         per_task_batch = B // self.num_tasks
 
+        key = self.key
+        key, subkey = jax.random.split(key)
+        aug_obs, _ = augment(data.observations, subkey)
+
+        key, subkey = jax.random.split(key)
+        aug_n_obs, _ = augment(data.next_observations, subkey)
+
+        self = self.replace(key=key)
+
         # Sort by task_id and reshape to (num_tasks, per_task_batch, ...)
         sorted_idx = jnp.argsort(data.task_ids)
 
@@ -358,8 +371,8 @@ class DrQ(OffPolicyAlgorithm[DrQConfig]):
             x_sorted = x[sorted_idx]
             return x_sorted.reshape(self.num_tasks, per_task_batch, *x.shape[1:])
 
-        obs        = split(data.observations)       # (T, B/T, C, H, W)
-        next_obs   = split(data.next_observations)  # (T, B/T, C, H, W)
+        obs        = split(aug_obs)       # (T, B/T, C, H, W)
+        next_obs   = split(aug_n_obs)     # (T, B/T, C, H, W)
         rewards    = split(data.rewards)            # (T, B/T, 1)
         actions    = split(data.actions)            # (T, B/T)
         dones      = split(data.dones)               # (T, B/T, 1)
@@ -367,6 +380,7 @@ class DrQ(OffPolicyAlgorithm[DrQConfig]):
 
         support  = jnp.linspace(self.v_min, self.v_max, self.n_atoms)
         delta_z  = (self.v_max - self.v_min) / (self.n_atoms - 1)
+
 
         def per_task_loss(params, t_obs, t_next_obs, t_rewards, t_actions, t_dones, t_task_ids):
             next_logits_online = self.critic.apply_fn(params, t_next_obs, t_task_ids)
@@ -395,7 +409,7 @@ class DrQ(OffPolicyAlgorithm[DrQConfig]):
             log_probs = jax.nn.log_softmax(online_logits, axis=-1)
             return -(m * log_probs).sum(axis=-1).mean()
 
-        _, critic_grads = jax.vmap(
+        '''_, critic_grads = jax.vmap(
             jax.value_and_grad(per_task_loss),
             in_axes=(None, 0, 0, 0, 0, 0, 0),
             out_axes=0,
@@ -403,7 +417,23 @@ class DrQ(OffPolicyAlgorithm[DrQConfig]):
 
         flat_critic_grads = jax.vmap(
             lambda x: jax.flatten_util.ravel_pytree(x)[0]
-        )(critic_grads)
+        )(critic_grads)'''
+
+        def compute_task_grad(task_data):
+            t_obs, t_next_obs, t_rewards, t_actions, t_dones, t_task_ids = task_data
+            return jax.value_and_grad(per_task_loss)(
+                self.critic.params, t_obs, t_next_obs, t_rewards, t_actions, t_dones, t_task_ids
+            )
+
+        _, critic_grads = jax.lax.map(
+            compute_task_grad,
+            (obs, next_obs, rewards, actions, dones, task_ids)
+        )
+
+        # ravel_pytree expects a single task's grad tree, so vmap over task axis
+        flat_critic_grads = jax.vmap(
+            lambda g: jax.flatten_util.ravel_pytree(g)[0]
+        )(critic_grads)  # (26, num_params)
 
         critic_avg_cos_sim, critic_cos_sim_mat = vmap_cos_sim(flat_critic_grads, self.num_tasks)
         critic_avg_grad_magnitude = jnp.linalg.norm(flat_critic_grads, axis=1).mean()
@@ -412,14 +442,7 @@ class DrQ(OffPolicyAlgorithm[DrQConfig]):
         return self, {
             "critic_avg_cos_sim":             critic_avg_cos_sim,
             "critic_avg_grad_magnitude":      critic_avg_grad_magnitude,
-            "critic_conflict_rate":           critic_conflict_metrics["conflict_rate"],
-            "critic_mean_conflict_magnitude": critic_conflict_metrics["mean_conflict_magnitude"],
-            "critic_mean_conflict_angle":     critic_conflict_metrics["mean_conflict_angle"],
-            "critic_per_task_conflict_rate":  critic_conflict_metrics["per_task_conflict_rate"],
-            "critic_per_task_grad_magnitude": critic_conflict_metrics["per_task_grad_magnitude"],
-            "critic_pairwise_conflict":       critic_conflict_metrics["pairwise_conflict"],
-            "critic_pairwise_cos_sim":        critic_conflict_metrics["pairwise_cos_sim"],
-            "critic_pairwise_angle":          critic_conflict_metrics["pairwise_angle"],
+            **critic_conflict_metrics,
         }
 
     @jax.jit
