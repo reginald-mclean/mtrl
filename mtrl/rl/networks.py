@@ -76,7 +76,6 @@ class QValueFunction(nn.Module):
                 )(x)
             assert self.action_dim is not None, 'Need to pass action_dim to QValueFunction'
             if not self.config.dueling:
-                print(self.config)
                 return get_nn_arch_for_config(self.config.network_config)(
                     config=self.config.network_config,
                     head_dim=self.config.num_atoms * self.action_dim,

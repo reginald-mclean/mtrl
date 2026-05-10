@@ -39,9 +39,6 @@ from mtrl.types import (
     Value,
 )
 
-import gc
-from memory_profiler import profile
-
 from mtrl.nn.augmentation import augment
 
 AlgorithmConfigType = TypeVar("AlgorithmConfigType", bound=AlgorithmConfig)
@@ -171,7 +168,9 @@ class OffPolicyAlgorithm(
 
             done = np.logical_or(terminations, truncations)
 
-            rewards = np.sign(rewards)
+            if type(env_config) is AtariConfig:
+                rewards = np.sign(rewards)
+
             buffer_obs = next_obs
             if "final_obs" in infos:
                 buffer_obs = np.where(

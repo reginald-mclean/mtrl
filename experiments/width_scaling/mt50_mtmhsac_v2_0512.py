@@ -40,10 +40,12 @@ def main() -> None:
         algorithm=MTSACConfig(
             num_tasks=num_tasks,
             gamma=0.99,
+            clip=True,
             actor_config=ContinuousActionPolicyConfig(
                 network_config=MultiHeadConfig(
                     width=width,
-                    num_tasks=num_tasks, optimizer=OptimizerConfig(max_grad_norm=1.0)
+                    num_tasks=num_tasks,
+                    optimizer=OptimizerConfig(max_grad_norm=1.0)
                 )
             ),
             critic_config=QValueFunctionConfig(
