@@ -417,15 +417,51 @@ class DrQ(OffPolicyAlgorithm[DrQConfig]):
 
         flat_critic_grads = jax.vmap(
             lambda x: jax.flatten_util.ravel_pytree(x)[0]
-        )(critic_grads)'''
+        )(critic_grads)
 
         def compute_task_grad(task_data):
             t_obs, t_next_obs, t_rewards, t_actions, t_dones, t_task_ids = task_data
             return jax.value_and_grad(per_task_loss)(
                 self.critic.params, t_obs, t_next_obs, t_rewards, t_actions, t_dones, t_task_ids
-            )
+            )'''
 
-        _, critic_grads = jax.lax.map(
+        def project_grad(flat_grad, seed, proj_dim, chunk_size=500_000):
+            num_params = len(flat_grad)
+            num_chunks = num_params // chunk_size
+            remainder = num_params % chunk_size
+
+            def body(i, projected):
+                chunk = jax.lax.dynamic_slice(flat_grad, (i * chunk_size,), (chunk_size,))
+                key = jax.random.PRNGKey(seed + i)
+                proj_chunk = jax.random.normal(key, (chunk_size, proj_dim)) / jnp.sqrt(proj_dim)
+                return projected + chunk @ proj_chunk
+
+            projected = jax.lax.fori_loop(0, num_chunks, body, jnp.zeros(proj_dim))
+
+            # handle remainder
+            if remainder > 0:
+                chunk = flat_grad[num_chunks * chunk_size:]  # (remainder,)
+                key = jax.random.PRNGKey(seed + num_chunks)
+                proj_chunk = jax.random.normal(key, (remainder, proj_dim)) / jnp.sqrt(proj_dim)
+                projected = projected + chunk @ proj_chunk
+
+            return projected  # (proj_dim,)
+
+
+        proj_dim = 10_000
+        proj_seed = 42  # fixed so same projection is used every call
+
+        def compute_task_grad(task_data):
+            t_obs, t_next_obs, t_rewards, t_actions, t_dones, t_task_ids = task_data
+            _, grad = jax.value_and_grad(per_task_loss)(
+                self.critic.params, t_obs, t_next_obs, t_rewards, t_actions, t_dones, t_task_ids
+            )
+            flat = jax.flatten_util.ravel_pytree(grad)[0]       # (300M,) transient
+            return project_grad(flat, proj_seed, proj_dim)       # (630K,)
+
+
+
+        critic_grads = jax.lax.map(
             compute_task_grad,
             (obs, next_obs, rewards, actions, dones, task_ids)
         )
