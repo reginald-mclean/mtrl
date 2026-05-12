@@ -345,6 +345,7 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
 
         return jax.tree.map(reconstruct_leaf, split_data)
 
+
     def update_critic(
         self,
         data: ReplayBufferSamples,
@@ -354,8 +355,11 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
         key, critic_loss_key = jax.random.split(self.key)
 
         if self.critic_network_type == 'c51':
-            # --- C51 distributional critic update ---
-            task_ids = jnp.argmax(data.observations[..., -self.num_tasks :], axis=1)
+            # ------------------------------------------------------------------ #
+            # Common: actor forward pass
+            # ------------------------------------------------------------------ #
+            task_ids = jnp.argmax(data.observations[..., -self.num_tasks:], axis=1)
+
             if self.actor_network_type == 'vanilla':
                 next_actions, next_action_log_probs = self.actor.apply_fn(
                     self.actor.params, data.next_observations
@@ -374,38 +378,100 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
                     self.critic.target_params, data.next_observations, next_actions, task_ids
                 )  # [num_critics, batch, n_atoms]
 
+            # ------------------------------------------------------------------ #
+            # Common: support, target probs, pessimistic scalar Q
+            # ------------------------------------------------------------------ #
             support = jnp.linspace(self.v_min, self.v_max, self.n_atoms)
-            target_probs = jax.nn.softmax(target_logits, axis=-1)
+            delta_z = (self.v_max - self.v_min) / (self.n_atoms - 1)
+            target_probs = jax.nn.softmax(target_logits, axis=-1)  # [num_critics, batch, n_atoms]
 
-            # Min expected Q across critics (pessimistic)
             expected_Q = jnp.sum(target_probs * support, axis=-1)  # [num_critics, batch]
-            min_Q_next = jnp.min(expected_Q, axis=0)  # [batch]
+            min_Q_idx = jnp.argmin(expected_Q, axis=0)             # [batch]  -- used by true C51
+            min_Q_next = jnp.min(expected_Q, axis=0)               # [batch]
 
-            # Soft backup target
             next_action_log_probs = next_action_log_probs.reshape(-1)
             target_value = min_Q_next - alpha_val.reshape(-1) * next_action_log_probs
-            scalar_target = data.rewards.reshape(-1) + (1 - data.dones.reshape(-1)) * self.gamma * target_value
-
-            # Project scalar target onto support (Dirac delta projection)
-            delta_z = (self.v_max - self.v_min) / (self.n_atoms - 1)
-            tz = jnp.clip(scalar_target, self.v_min, self.v_max)
-            b = (tz - self.v_min) / delta_z
-            l = jnp.floor(b).astype(jnp.int32)
-            u = jnp.ceil(b).astype(jnp.int32)
+            scalar_target = (
+                data.rewards.reshape(-1)
+                + (1 - data.dones.reshape(-1)) * self.gamma * target_value
+            )
 
             B = data.observations.shape[0]
-            m = jnp.zeros((B, self.n_atoms))
-            m = m.at[jnp.arange(B), l].add(u - b)
-            m = m.at[jnp.arange(B), u].add(b - l)
+
+            # ------------------------------------------------------------------ #
+            # Target distribution m: differs per loss variant
+            # ------------------------------------------------------------------ #
+            if self.critic_loss_type == 'two_hot':
+                # ---- Original implementation: scalar target, two-atom projection ----
+                # Projects scalar_target onto the two nearest atoms (linear interp).
+                # Equivalent to Two-Hot encoding. Simple but produces spiky targets.
+                tz = jnp.clip(scalar_target, self.v_min, self.v_max)
+                b = (tz - self.v_min) / delta_z
+                l = jnp.floor(b).astype(jnp.int32)
+                u = jnp.ceil(b).astype(jnp.int32)
+
+                m = jnp.zeros((B, self.n_atoms))
+                m = m.at[jnp.arange(B), l].add(u - b)
+                m = m.at[jnp.arange(B), u].add(b - l)
+
+            elif self.critic_loss_type == 'c51':
+                # ---- True C51: distributional Bellman backup ----
+                # Shifts each atom of the *min-Q critic's distribution* by r + gamma*z,
+                # then projects back onto the fixed support. This is the only variant
+                # that actually propagates return-distribution information.
+                min_target_probs = target_probs[
+                    min_Q_idx, jnp.arange(B)
+                ]  # [batch, n_atoms]  pessimistic critic's distribution
+
+                # Shift each atom through the Bellman operator, accounting for entropy
+                # The SAC soft backup shifts atom j by: r + gamma*(z_j - alpha*log_pi)
+                log_probs_expanded = next_action_log_probs[:, None]           # [batch, 1]
+                tz = jnp.clip(
+                    data.rewards.reshape(-1, 1)
+                    + (1 - data.dones.reshape(-1, 1))
+                    * self.gamma
+                    * (support[None, :] - alpha_val.reshape(-1, 1) * log_probs_expanded),
+                    self.v_min,
+                    self.v_max,
+                )  # [batch, n_atoms]
+
+                b = (tz - self.v_min) / delta_z
+                l = jnp.floor(b).astype(jnp.int32)  # [batch, n_atoms]
+                u = jnp.ceil(b).astype(jnp.int32)   # [batch, n_atoms]
+
+                # Scatter each atom's probability mass to its two neighbours
+                batch_idx = jnp.arange(B)[:, None] * jnp.ones((1, self.n_atoms), dtype=jnp.int32)
+                m = jnp.zeros((B, self.n_atoms))
+                m = m.at[batch_idx, l].add(min_target_probs * (u - b))
+                m = m.at[batch_idx, u].add(min_target_probs * (b - l))
+
+            elif self.critic_loss_type == 'hl_gauss':
+                # ---- HL-Gauss: Gaussian-smoothed scalar target ----
+                # Same scalar backup as two_hot, but spreads probability mass via a
+                # Gaussian centred on scalar_target. Smoother targets → better
+                # gradient conditioning. sigma = 0.75 * delta_z is the Farebrother
+                # et al. default; treat as a mild hyperparameter.
+                sigma = 0.75 * delta_z
+                atom_centers = support[None, :]          # [1, n_atoms]
+                tz = scalar_target[:, None]              # [batch, 1]
+
+                m = jnp.exp(-0.5 * ((atom_centers - tz) / sigma) ** 2)
+                m = m / m.sum(axis=-1, keepdims=True)   # [batch, n_atoms]
+
+            else:
+                raise ValueError(f"Unknown critic_loss_type: {self.critic_loss_type!r}")
+
             m = jax.lax.stop_gradient(m)
 
-            def critic_loss_c51(
-                params: FrozenDict,
-            ) -> tuple[Float[Array, ""], Float[Array, ""]]:
+            # ------------------------------------------------------------------ #
+            # Common: cross-entropy loss and gradient step
+            # ------------------------------------------------------------------ #
+            def critic_loss_fn(params: FrozenDict) -> tuple[Float[Array, ""], Float[Array, ""]]:
                 online_logits = self.critic.apply_fn(
-                    params, data.observations, data.actions, task_ids
+                    params, data.observations, data.actions,
                 )  # [num_critics, batch, n_atoms]
                 log_probs = jax.nn.log_softmax(online_logits, axis=-1)
+
                 if task_weights is not None:
                     loss = -(task_weights.reshape(1, -1, 1) * m * log_probs).sum(axis=-1).mean()
                 else:
@@ -414,11 +480,11 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
                 q_vals = jnp.sum(jax.nn.softmax(online_logits, axis=-1) * support, axis=-1)
                 return loss, q_vals.mean()
 
+
             (critic_loss_value, qf_values), critic_grads = jax.value_and_grad(
-                critic_loss_c51, has_aux=True
+                critic_loss_fn, has_aux=True
             )(self.critic.params)
             flat_grads, _ = flatten_util.ravel_pytree(critic_grads)
-
 
             key, optimizer_key = jax.random.split(key)
             critic = self.critic.apply_gradients(
@@ -584,7 +650,7 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
 
             if self.critic_network_type == 'c51':
                 logits = self.critic.apply_fn(
-                    self.critic.params, _data.observations, action_samples, task_ids
+                    self.critic.params, _data.observations, action_samples, # task_ids
                 )
                 support = jnp.linspace(self.v_min, self.v_max, self.n_atoms)
                 q_values = jnp.sum(jax.nn.softmax(logits, axis=-1) * support, axis=-1)  # [num_critics, batch]
@@ -664,6 +730,143 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
             "alpha": jnp.exp(alpha.params["params"]["log_alpha"]).sum(),  # pyright: ignore [reportArgumentType]
         }
 
+    def compute_gram_metrics(self, flat_grads: jnp.ndarray, num_tasks: int) -> dict:
+        """
+        Compute Gram matrix G = grads @ grads.T (T x T) and derived metrics.
+ 
+        flat_grads: T x d matrix of per-task gradients
+        Returns:
+            gram:               T x T raw dot product matrix
+            cosine_from_gram:   T x T cosine similarity matrix derived from gram
+            avg_cosine_gram:    scalar mean cosine similarity (off-diagonal)
+            gram_diag:          T vector of per-task gradient squared norms
+            gram_off_diag_mean: scalar mean off-diagonal gram value
+            gram_off_diag_std:  scalar std of off-diagonal gram values
+        """
+        # T x T gram matrix
+        gram = flat_grads @ flat_grads.T  # T x T
+ 
+        # Cosine from gram: G_ij / sqrt(G_ii * G_jj)
+        norms = jnp.sqrt(jnp.diag(gram))  # T
+        norm_outer = jnp.outer(norms, norms)  # T x T
+        cosine_from_gram = gram / (norm_outer + 1e-8)  # T x T
+ 
+        # Mask diagonal for off-diagonal stats
+        mask = 1.0 - jnp.eye(num_tasks)
+        n_pairs = num_tasks * (num_tasks - 1)
+ 
+        avg_cosine_gram = (cosine_from_gram * mask).sum() / n_pairs
+        gram_off_diag_mean = (gram * mask).sum() / n_pairs
+        gram_off_diag_std = jnp.sqrt(
+            ((gram - gram_off_diag_mean) ** 2 * mask).sum() / n_pairs
+        )
+ 
+        return {
+            "gram":               gram,
+            "cosine_from_gram":   cosine_from_gram,
+            "avg_cosine_gram":    avg_cosine_gram,
+            "gram_diag":          jnp.diag(gram),
+            "gram_off_diag_mean": gram_off_diag_mean,
+            "gram_off_diag_std":  gram_off_diag_std,
+        }
+ 
+ 
+    def compute_support_metrics(
+        self,
+        flat_grads: jnp.ndarray,
+        num_tasks: int,
+        support_percentile: float = 0.8,  # top 20% of dimensions by magnitude
+    ) -> dict:
+        """
+        Compute gradient support structure and genuine vs ghost conflict decomposition.
+     
+        flat_grads:          T x d matrix of per-task gradients
+        support_percentile:  quantile threshold for support membership (default 0.8 = top 20%)
+ 
+        Returns:
+            supports:                   T x d boolean matrix of support membership
+            pairwise_jaccard:           T x T Jaccard similarity over supports
+            avg_jaccard:                scalar mean pairwise Jaccard (off-diagonal)
+            genuine_conflict_count:     T x T count of genuine conflicts (both in support, sign conflict)
+            ghost_conflict_count:       T x T count of ghost conflicts (one not in support, sign conflict)
+            genuine_conflict_rate:      T x T genuine conflicts as fraction of all conflicts
+            ghost_conflict_rate:        T x T ghost conflicts as fraction of all conflicts
+            avg_genuine_conflict_rate:  scalar mean genuine conflict rate (off-diagonal)
+            avg_ghost_conflict_rate:    scalar mean ghost conflict rate (off-diagonal)
+            ghost_to_genuine_ratio:     scalar ratio of ghost to genuine conflicts — key metric
+            per_task_support_size:      T vector of support sizes (sparsity measure)
+            avg_support_size:           scalar mean support size across tasks
+        """
+        T, d = flat_grads.shape
+ 
+        # --- Support identification ---
+        # Per-task threshold at support_percentile of absolute gradient magnitude
+        thresholds = jnp.quantile(
+            jnp.abs(flat_grads), support_percentile, axis=1, keepdims=True
+        )  # T x 1
+        supports = jnp.abs(flat_grads) >= thresholds  # T x d boolean
+ 
+        # --- Pairwise Jaccard over supports ---
+        # supports_i & supports_j: T x T x d via broadcasting
+        supports_i = supports[:, None, :]   # T x 1 x d
+        supports_j = supports[None, :, :]   # 1 x T x d
+ 
+        intersection = (supports_i & supports_j).sum(axis=-1).astype(jnp.float32)  # T x T
+        union = (supports_i | supports_j).sum(axis=-1).astype(jnp.float32)         # T x T
+        pairwise_jaccard = intersection / (union + 1e-8)  # T x T
+ 
+        mask = 1.0 - jnp.eye(T)
+        n_pairs = T * (T - 1)
+        avg_jaccard = (pairwise_jaccard * mask).sum() / n_pairs
+ 
+        # --- Genuine vs ghost conflict decomposition ---
+        # Sign conflict: gradients point in opposite directions elementwise
+        grads_i = flat_grads[:, None, :]   # T x 1 x d
+        grads_j = flat_grads[None, :, :]   # 1 x T x d
+        sign_conflict = (grads_i * grads_j) < 0  # T x T x d
+ 
+        # Joint support: both tasks have non-negligible gradient here
+        joint_support = supports_i & supports_j  # T x T x d
+ 
+        # Genuine conflict: sign conflict AND both tasks in support
+        genuine = (joint_support & sign_conflict).sum(axis=-1).astype(jnp.float32)   # T x T
+ 
+        # Ghost conflict: sign conflict AND at least one task NOT in support
+        ghost = (~joint_support & sign_conflict).sum(axis=-1).astype(jnp.float32)    # T x T
+ 
+        total_conflict = genuine + ghost + 1e-8
+ 
+        genuine_conflict_rate = genuine / total_conflict  # T x T
+        ghost_conflict_rate = ghost / total_conflict      # T x T
+ 
+        avg_genuine_conflict_rate = (genuine_conflict_rate * mask).sum() / n_pairs
+        avg_ghost_conflict_rate = (ghost_conflict_rate * mask).sum() / n_pairs
+ 
+        # Key metric: ghost-to-genuine ratio — should increase with T if hypothesis holds
+        total_genuine = genuine.sum() + 1e-8
+        total_ghost = ghost.sum()
+        ghost_to_genuine_ratio = total_ghost / total_genuine
+ 
+        # --- Support size (sparsity) ---
+        per_task_support_size = supports.sum(axis=-1).astype(jnp.float32)  # T
+        avg_support_size = per_task_support_size.mean()
+ 
+        return {
+            "supports":                  supports,
+            "pairwise_jaccard":          pairwise_jaccard,
+            "avg_jaccard":               avg_jaccard,
+            "genuine_conflict_count":    genuine,
+            "ghost_conflict_count":      ghost,
+            "genuine_conflict_rate":     genuine_conflict_rate,
+            "ghost_conflict_rate":       ghost_conflict_rate,
+            "avg_genuine_conflict_rate": avg_genuine_conflict_rate,
+            "avg_ghost_conflict_rate":   avg_ghost_conflict_rate,
+            "ghost_to_genuine_ratio":    ghost_to_genuine_ratio,
+            "per_task_support_size":     per_task_support_size,
+            "avg_support_size":          avg_support_size,
+        }
+
+
     @jax.jit
     def compute_weights(self, data: ReplayBufferSamples) -> tuple[Self, LogDict]:
         task_ids = data.observations[...,-self.num_tasks:]
@@ -706,7 +909,7 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
                     ).sample_and_log_prob(seed=critic_loss_key)
 
                 target_logits = self.critic.apply_fn(
-                    self.critic.target_params, _data.next_observations, next_actions, jnp.argmax(task_ids, axis=1)
+                    self.critic.target_params, _data.next_observations, next_actions,
                 )
                 target_probs = jax.nn.softmax(target_logits, axis=-1)
                 expected_Q = jnp.sum(target_probs * support, axis=-1)
@@ -716,19 +919,64 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
                 target_value = min_Q_next - _alpha_val.reshape(-1) * next_lp
                 scalar_target = _data.rewards.reshape(-1) + (1 - _data.dones.reshape(-1)) * self.gamma * target_value
 
-                tz = jnp.clip(scalar_target, self.v_min, self.v_max)
-                b = (tz - self.v_min) / delta_z
-                l = jnp.floor(b).astype(jnp.int32)
-                u = jnp.ceil(b).astype(jnp.int32)
-
                 per_task_batch = _data.observations.shape[0]
-                m = jnp.zeros((per_task_batch, self.n_atoms))
-                m = m.at[jnp.arange(per_task_batch), l].add(u - b)
-                m = m.at[jnp.arange(per_task_batch), u].add(b - l)
+
+                # ---------------------------------------------------------- #
+                # Target distribution m: differs per loss variant
+                # ---------------------------------------------------------- #
+                if self.critic_loss_type == 'two_hot':
+                    # ---- Original: scalar target, two-atom projection ----
+                    tz = jnp.clip(scalar_target, self.v_min, self.v_max)
+                    b = (tz - self.v_min) / delta_z
+                    l = jnp.floor(b).astype(jnp.int32)
+                    u = jnp.ceil(b).astype(jnp.int32)
+
+                    m = jnp.zeros((per_task_batch, self.n_atoms))
+                    m = m.at[jnp.arange(per_task_batch), l].add(u - b)
+                    m = m.at[jnp.arange(per_task_batch), u].add(b - l)
+
+                elif self.critic_loss_type == 'c51':
+                    # ---- True C51: distributional Bellman backup ----
+                    min_Q_idx = jnp.argmin(expected_Q, axis=0)  # [batch]
+                    min_target_probs = target_probs[
+                        min_Q_idx, jnp.arange(per_task_batch)
+                    ]  # [batch, n_atoms]
+
+                    log_probs_expanded = next_lp[:, None]  # [batch, 1]
+                    tz = jnp.clip(
+                        _data.rewards.reshape(-1, 1)
+                        + (1 - _data.dones.reshape(-1, 1))
+                        * self.gamma
+                        * (support[None, :] - _alpha_val.reshape(-1, 1) * log_probs_expanded),
+                        self.v_min,
+                        self.v_max,
+                    )  # [batch, n_atoms]
+
+                    b = (tz - self.v_min) / delta_z
+                    l = jnp.floor(b).astype(jnp.int32)
+                    u = jnp.ceil(b).astype(jnp.int32)
+
+                    batch_idx = jnp.arange(per_task_batch)[:, None] * jnp.ones((1, self.n_atoms), dtype=jnp.int32)
+                    m = jnp.zeros((per_task_batch, self.n_atoms))
+                    m = m.at[batch_idx, l].add(min_target_probs * (u - b))
+                    m = m.at[batch_idx, u].add(min_target_probs * (b - l))
+
+                elif self.critic_loss_type == 'hl_gauss':
+                    # ---- HL-Gauss: Gaussian-smoothed scalar target ----
+                    sigma = 0.75 * delta_z
+                    atom_centers = support[None, :]    # [1, n_atoms]
+                    tz = scalar_target[:, None]        # [batch, 1]
+
+                    m = jnp.exp(-0.5 * ((atom_centers - tz) / sigma) ** 2)
+                    m = m / m.sum(axis=-1, keepdims=True)  # [batch, n_atoms]
+
+                else:
+                    raise ValueError(f"Unknown critic_loss_type: {self.critic_loss_type!r}")
+
                 m = jax.lax.stop_gradient(m)
 
                 online_logits = self.critic.apply_fn(
-                    params, _data.observations, _data.actions, jnp.argmax(task_ids, axis=1)
+                    params, _data.observations, _data.actions,
                 )
                 log_probs = jax.nn.log_softmax(online_logits, axis=-1)
                 if _task_weights is not None:
@@ -796,6 +1044,10 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
         critic_avg_grad_magnitude = jnp.linalg.norm(flat_critic_grads, axis=1).mean()
         critic_conflict_metrics = compute_conflict_metrics(critic_cos_sim_mat, flat_critic_grads)
 
+        critic_gram_metrics = self.compute_gram_metrics(flat_critic_grads, self.num_tasks)
+        critic_support_metrics = self.compute_support_metrics(flat_critic_grads, self.num_tasks)
+
+
         # --- Actor ---
         key, actor_loss_key = jax.random.split(self.key)
         self = self.replace(key=key)
@@ -812,7 +1064,7 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
 
             log_probs = log_probs.reshape(-1, 1)
             q_values = self.critic.apply_fn(
-                self.critic.params, _data.observations, action_samples # , jnp.argmax(task_ids, axis=1)
+                self.critic.params, _data.observations, action_samples
             )
             min_qf_values = jnp.min(q_values, axis=0)
             if _task_weights is not None:
@@ -833,6 +1085,10 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
         actor_avg_cos_sim, actor_cos_sim_mat = vmap_cos_sim(flat_actor_grads, self.num_tasks)
         actor_avg_grad_magnitude = jnp.linalg.norm(flat_actor_grads, axis=1).mean()
         actor_conflict_metrics = compute_conflict_metrics(actor_cos_sim_mat, flat_actor_grads)
+
+        actor_gram_metrics = self.compute_gram_metrics(flat_actor_grads, self.num_tasks)
+        actor_support_metrics = self.compute_support_metrics(flat_actor_grads, self.num_tasks)
+
 
         return self, {
             # Existing metrics
@@ -877,7 +1133,42 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
             "actor_avg_participation_ratio":         actor_conflict_metrics["avg_participation_ratio"],
             "actor_per_task_participation_ratio":    actor_conflict_metrics["per_task_participation_ratio"],
             "actor_effective_rank":                  actor_conflict_metrics["effective_rank"],
+            # New Gram matrix metrics — critic
+            "critic_avg_cosine_gram":                critic_gram_metrics["avg_cosine_gram"],
+            "critic_gram_diag":                      critic_gram_metrics["gram_diag"],
+            "critic_gram_off_diag_mean":             critic_gram_metrics["gram_off_diag_mean"],
+            "critic_gram_off_diag_std":              critic_gram_metrics["gram_off_diag_std"],
+            "critic_pairwise_gram":                  critic_gram_metrics["gram"],
+            "critic_pairwise_cosine_gram":           critic_gram_metrics["cosine_from_gram"],
+            # New Gram matrix metrics — actor
+            "actor_avg_cosine_gram":                 actor_gram_metrics["avg_cosine_gram"],
+            "actor_gram_diag":                       actor_gram_metrics["gram_diag"],
+            "actor_gram_off_diag_mean":              actor_gram_metrics["gram_off_diag_mean"],
+            "actor_gram_off_diag_std":               actor_gram_metrics["gram_off_diag_std"],
+            "actor_pairwise_gram":                   actor_gram_metrics["gram"],
+            "actor_pairwise_cosine_gram":            actor_gram_metrics["cosine_from_gram"],
+            # New support metrics — critic
+            "critic_avg_jaccard":                    critic_support_metrics["avg_jaccard"],
+            "critic_pairwise_jaccard":               critic_support_metrics["pairwise_jaccard"],
+            "critic_avg_genuine_conflict_rate":      critic_support_metrics["avg_genuine_conflict_rate"],
+            "critic_avg_ghost_conflict_rate":        critic_support_metrics["avg_ghost_conflict_rate"],
+            "critic_ghost_to_genuine_ratio":         critic_support_metrics["ghost_to_genuine_ratio"],
+            "critic_per_task_support_size":          critic_support_metrics["per_task_support_size"],
+            "critic_avg_support_size":               critic_support_metrics["avg_support_size"],
+            "critic_pairwise_genuine_conflict_rate": critic_support_metrics["genuine_conflict_rate"],
+            "critic_pairwise_ghost_conflict_rate":   critic_support_metrics["ghost_conflict_rate"],
+            # New support metrics — actor
+            "actor_avg_jaccard":                     actor_support_metrics["avg_jaccard"],
+            "actor_pairwise_jaccard":                actor_support_metrics["pairwise_jaccard"],
+            "actor_avg_genuine_conflict_rate":       actor_support_metrics["avg_genuine_conflict_rate"],
+            "actor_avg_ghost_conflict_rate":         actor_support_metrics["avg_ghost_conflict_rate"],
+            "actor_ghost_to_genuine_ratio":          actor_support_metrics["ghost_to_genuine_ratio"],
+            "actor_per_task_support_size":           actor_support_metrics["per_task_support_size"],
+            "actor_avg_support_size":                actor_support_metrics["avg_support_size"],
+            "actor_pairwise_genuine_conflict_rate":  actor_support_metrics["genuine_conflict_rate"],
+            "actor_pairwise_ghost_conflict_rate":    actor_support_metrics["ghost_conflict_rate"],
         }
+
 
     @jax.jit
     def _update_inner(self, data: ReplayBufferSamples) -> tuple[Self, LogDict]:
