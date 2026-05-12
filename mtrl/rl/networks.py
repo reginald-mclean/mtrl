@@ -130,7 +130,7 @@ class ImpalaDQN(nn.Module):
     task_embed_config: TaskEmbeddingConfig
     action_dim: int
     use_layer_norm: bool = True
-    n_hidden: int = 2048
+    n_hidden: int = 512
     num_atoms: int = 51
 
     @nn.compact
@@ -142,7 +142,7 @@ class ImpalaDQN(nn.Module):
             x = nn.LayerNorm()(x)
         return DistributionalDense(
             action_dim=self.action_dim,
-            n_hidden=self.n_hidden,
+            n_hidden=self.n_hidden*self.impala_config.scale,
             dueling=True,
             num_atoms=self.num_atoms,
             layernorm=True,

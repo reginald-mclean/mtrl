@@ -152,6 +152,8 @@ class OffPolicyAlgorithm(
         start_time = time.time()
         task_ids = jnp.arange(envs.num_envs)
 
+        total_steps = 0
+
         for global_step in range(start_step, config.total_steps // envs.num_envs):
             total_steps = global_step * envs.num_envs
 
@@ -209,6 +211,10 @@ class OffPolicyAlgorithm(
                     )
 
             if global_step > config.warmstart_steps:
+                metrics_data = replay_buffer.sample(envs.num_envs * 128)
+                self, update_logs = self.compute_weights(metrics_data)
+                print(update_logs)
+                exit(0)
                 # Update the agent with data (replay_ratio iterations)
                 replay_ratio = getattr(config, 'replay_ratio', 1)
                 for _ in range(replay_ratio):
@@ -314,6 +320,46 @@ class OffPolicyAlgorithm(
                     # Reset envs again to exit eval mode
                     if not eval_envs:
                         obs, _ = envs.reset()
+
+        mean_ep_return = np.mean(list(global_episodic_return))
+        print(f"global_step={total_steps}, mean_episodic_return={mean_ep_return:.4f}")
+        if track:
+            wandb.log(
+            {
+                "charts/mean_episodic_return": mean_ep_return,
+                "charts/mean_episodic_length": np.mean(list(global_episodic_length)),
+            },
+                step=total_steps,
+            )
+            mean_success_rate, mean_returns, per_task_metrics = (
+                env_config.evaluate(eval_envs if eval_envs else envs, self)
+            )
+            if isinstance(env_config, AtariConfig):
+                eval_metrics = {
+                    "charts/mean_evaluation_return": float(mean_returns),
+                    "charts/mean_hns": float(mean_success_rate),
+                } | {
+                    f"charts/{task_name}_hns": float(hns)
+                    for task_name, hns in per_task_metrics.items()
+                }
+                print(eval_metrics)
+                print(f"total_steps={total_steps}, mean evaluation return: {mean_returns:.4f}, median HNS: {mean_success_rate:.4f}")
+            else:
+                print(per_task_metrics)
+                eval_metrics = {
+                    "charts/mean_success_rate": float(mean_success_rate),
+                    "charts/mean_evaluation_return": float(mean_returns),
+                } | {
+                    f"charts/{task_name}_success_rate": float(sr)
+                    for task_name, sr in per_task_metrics.items()
+                }
+                print(f"total_steps={total_steps}, mean evaluation success rate: {mean_success_rate:.4f} return: {mean_returns:.4f}")
+
+            wandb.log(eval_metrics, step=total_steps)
+            metrics_data = replay_buffer.sample(envs.num_envs * 128)
+            self, update_logs = self.compute_weights(metrics_data)
+            wandb.log(update_logs, step=total_steps)
+
         return self
 
 
