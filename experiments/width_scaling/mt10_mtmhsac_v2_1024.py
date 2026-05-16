@@ -18,15 +18,17 @@ class Args:
     track: bool = False
     wandb_project: str | None = None
     wandb_entity: str | None = None
-    data_dir: Path = Path("./experiment_results")
+    data_dir: Path = Path("./results")
     resume: bool = False
 
 
 def main() -> None:
     args = tyro.cli(Args)
 
+    width=1024
+
     experiment = Experiment(
-        exp_name="mt10_mtmhsac_v2_width_1024",
+        exp_name=f"mt10_{WIDTH}_may_11_metrics",
         seed=args.seed,
         data_dir=args.data_dir,
         env=MetaworldConfig(
@@ -34,6 +36,7 @@ def main() -> None:
             terminate_on_success=False,
         ),
         algorithm=MTSACConfig(
+            clip=True,
             num_tasks=10,
             gamma=0.99,
             actor_config=ContinuousActionPolicyConfig(
@@ -56,7 +59,7 @@ def main() -> None:
             buffer_size=int(1e6),
             batch_size=1280,
         ),
-        checkpoint=True,
+        checkpoint=False,
         resume=args.resume,
     )
 

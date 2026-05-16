@@ -18,7 +18,7 @@ class Args:
     track: bool = False
     wandb_project: str | None = None
     wandb_entity: str | None = None
-    data_dir: Path = Path("./experiment_results")
+    data_dir: Path = Path("./results")
     resume: bool = False
 
 
@@ -28,7 +28,7 @@ def main() -> None:
     WIDTH = 256
 
     experiment = Experiment(
-        exp_name=f"mt10_mtmhsac_v2_width_{WIDTH}",
+        exp_name=f"mt10_256_may_11_metrics",
         seed=args.seed,
         data_dir=args.data_dir,
         env=MetaworldConfig(
@@ -38,6 +38,7 @@ def main() -> None:
         algorithm=MTSACConfig(
             num_tasks=10,
             gamma=0.99,
+            clip=True,
             actor_config=ContinuousActionPolicyConfig(
                 network_config=MultiHeadConfig(
                     width=WIDTH,
@@ -59,7 +60,7 @@ def main() -> None:
             buffer_size=int(1e6),
             batch_size=1280,
         ),
-        checkpoint=True,
+        checkpoint=False,
         resume=args.resume,
     )
 

@@ -18,7 +18,7 @@ class Args:
     track: bool = False
     wandb_project: str | None = None
     wandb_entity: str | None = None
-    data_dir: Path = Path("./experiment_results")
+    data_dir: Path = Path("./results")
     resume: bool = False
     reward_func_version: str = 'v2'
 
@@ -28,7 +28,7 @@ def main() -> None:
     WIDTH = 512
 
     experiment = Experiment(
-        exp_name=f"mt10_{WIDTH}_grad_tracking_{args.reward_func_version}",
+        exp_name=f"mt10_{WIDTH}_may_11_metrics",
         seed=args.seed,
         data_dir=args.data_dir,
         env=MetaworldConfig(
@@ -38,12 +38,9 @@ def main() -> None:
             reward_func_version=args.reward_func_version,
         ),
         algorithm=MTSACConfig(
-            clip=False,
+            clip=True,
             num_tasks=10,
             gamma=0.99,
-            v_min=-10.0,
-            v_max=10.0,
-            n_atoms=101,
             actor_config=ContinuousActionPolicyConfig(
                 network_config=MultiHeadConfig(
                     width=WIDTH,
@@ -52,8 +49,7 @@ def main() -> None:
                 )
             ),
             critic_config=QValueFunctionConfig(
-                use_classification=False, # True,
-                num_atoms=101,
+                use_classification=False,
                 network_config=MultiHeadConfig(
                     width=WIDTH,
                     num_tasks=10,
@@ -63,7 +59,6 @@ def main() -> None:
             num_critics=2,
         ),
         training_config=OffPolicyTrainingConfig(
-            returns_normalization=True,
             total_steps=int(2e7),
             buffer_size=int(1e6),
             batch_size=1280,

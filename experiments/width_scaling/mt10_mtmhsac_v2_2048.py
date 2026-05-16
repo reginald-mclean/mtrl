@@ -18,7 +18,7 @@ class Args:
     track: bool = False
     wandb_project: str | None = None
     wandb_entity: str | None = None
-    data_dir: Path = Path("./experiment_results")
+    data_dir: Path = Path("./results")
     resume: bool = False
 
 
@@ -26,7 +26,7 @@ def main() -> None:
     args = tyro.cli(Args)
 
     experiment = Experiment(
-        exp_name="mt10_mtmhsac_v2_width_2048",
+        exp_name=f"mt10_2048_may_11_metrics",
         seed=args.seed,
         data_dir=args.data_dir,
         env=MetaworldConfig(
@@ -35,6 +35,7 @@ def main() -> None:
         ),
         algorithm=MTSACConfig(
             num_tasks=10,
+            clip=True,
             gamma=0.99,
             actor_config=ContinuousActionPolicyConfig(
                 network_config=MultiHeadConfig(
@@ -56,7 +57,7 @@ def main() -> None:
             buffer_size=int(1e6),
             batch_size=1280,
         ),
-        checkpoint=True,
+        checkpoint=False,
         resume=args.resume,
     )
 

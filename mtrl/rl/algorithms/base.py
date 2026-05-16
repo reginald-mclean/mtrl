@@ -211,10 +211,6 @@ class OffPolicyAlgorithm(
                     )
 
             if global_step > config.warmstart_steps:
-                metrics_data = replay_buffer.sample(envs.num_envs * 128)
-                self, update_logs = self.compute_weights(metrics_data)
-                print(update_logs)
-                exit(0)
                 # Update the agent with data (replay_ratio iterations)
                 replay_ratio = getattr(config, 'replay_ratio', 1)
                 for _ in range(replay_ratio):
