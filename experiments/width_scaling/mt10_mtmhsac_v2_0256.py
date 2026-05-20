@@ -18,7 +18,7 @@ class Args:
     track: bool = False
     wandb_project: str | None = None
     wandb_entity: str | None = None
-    data_dir: Path = Path("./experiment_results")
+    data_dir: Path = Path("./results")
     resume: bool = False
 
 
@@ -38,7 +38,6 @@ def main() -> None:
         algorithm=MTSACConfig(
             num_tasks=10,
             gamma=0.99,
-            clip=True,
             actor_config=ContinuousActionPolicyConfig(
                 network_config=MultiHeadConfig(
                     width=WIDTH,
