@@ -56,7 +56,7 @@ def main() -> None:
             buffer_size=int(1e6),
             batch_size=1280,
         ),
-        checkpoint=True,
+        checkpoint=False,
         resume=args.resume,
     )
 

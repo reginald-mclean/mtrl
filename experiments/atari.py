@@ -30,7 +30,7 @@ def main() -> None:
     num_tasks = 26
 
     experiment = Experiment(
-        exp_name=f"atari_26_games_dueling_dqn_augmentation_updates_eval_envs_scale_mean_hns_{args.scale}",
+        exp_name=f"atari_26_games_dueling_dqn_augmentation_updates_eval_envs_scale_mean_hns_new_grad_metrics_{args.scale}",
         seed=args.seed,
         data_dir=args.data_dir,
         env=AtariConfig(),

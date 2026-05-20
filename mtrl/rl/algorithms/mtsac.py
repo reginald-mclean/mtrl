@@ -125,6 +125,7 @@ class MTSACConfig(AlgorithmConfig):
     v_min: float = -10.0
     v_max: float = 10.0
     n_atoms: int = 51
+    max_q_value: float | None = None
 
 
 class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
@@ -148,6 +149,8 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
     v_min: float = struct.field(pytree_node=False)
     v_max: float = struct.field(pytree_node=False)
     n_atoms: int = struct.field(pytree_node=False)
+    max_q_value: float | None = struct.field(pytree_node=False)
+
 
     @override
     @staticmethod
@@ -281,6 +284,7 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
             v_min=config.v_min,
             v_max=config.v_max,
             n_atoms=n_atoms,
+            max_q_value=config.max_q_value,
         )
 
     def reset(self, env_mask) -> None:
@@ -554,10 +558,12 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
 
             q_pred = self.critic.apply_fn(params, _data.observations, _data.actions)
 
-            # HACK: Clipping Q values to approximate theoretical maximum for Metaworld
-            if self.clip: # or (not isinstance(self.actor.opt_state[0], PCGradState) and not isinstance(self.actor.opt_state[0], GradNormState)):
-                next_q_value = jnp.clip(next_q_value, -5000, 5000)
-                q_pred = jnp.clip(q_pred, -5000, 5000)
+            if self.max_q_value is not None:
+                # HACK: Clipping Q values to approximate theoretical maximum for Metaworld
+                next_q_value = jnp.clip(
+                    next_q_value, -self.max_q_value, self.max_q_value
+                )
+                q_pred = jnp.clip(q_pred, -self.max_q_value, self.max_q_value)
 
             if _task_weights is not None:
                 loss = (_task_weights * (q_pred - next_q_value) ** 2).mean()

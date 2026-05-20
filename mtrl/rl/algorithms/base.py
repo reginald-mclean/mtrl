@@ -136,7 +136,6 @@ class OffPolicyAlgorithm(
 
         obs, _ = envs.reset()
 
-        done = np.full((envs.num_envs,), False)
         start_step, episodes_ended, last_eval_episodes = 0, 0, 0
 
         if checkpoint_metadata is not None:
@@ -168,7 +167,8 @@ class OffPolicyAlgorithm(
 
             next_obs, rewards, terminations, truncations, infos = envs.step(actions)
 
-            done = np.logical_or(terminations, truncations)
+            done = terminations
+            episode_ended = np.logical_or(terminations, truncations)
 
             if type(env_config) is AtariConfig:
                 rewards = np.sign(rewards)
@@ -176,7 +176,7 @@ class OffPolicyAlgorithm(
             buffer_obs = next_obs
             if "final_obs" in infos:
                 buffer_obs = np.where(
-                    done[:, None], np.stack(infos["final_obs"]), next_obs
+                    episode_ended[:, None], np.stack(infos["final_obs"]), next_obs
                 )
 
             if type(env_config) is not AtariConfig:
@@ -186,7 +186,7 @@ class OffPolicyAlgorithm(
 
             obs = next_obs
 
-            for i, env_ended in enumerate(done):
+            for i, env_ended in enumerate(episode_ended):
                 if env_ended:
                     if type(env_config) is MetaworldConfig:
                         ep_return = infos['final_info']["episode"]["r"][i]
@@ -211,10 +211,6 @@ class OffPolicyAlgorithm(
                     )
 
             if global_step > config.warmstart_steps:
-                metrics_data = replay_buffer.sample(envs.num_envs * 128)
-                self, update_logs = self.compute_weights(metrics_data)
-                print(update_logs)
-                exit(0)
                 # Update the agent with data (replay_ratio iterations)
                 replay_ratio = getattr(config, 'replay_ratio', 1)
                 for _ in range(replay_ratio):

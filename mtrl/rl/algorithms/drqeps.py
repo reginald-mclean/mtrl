@@ -448,7 +448,7 @@ class DrQ(OffPolicyAlgorithm[DrQConfig]):
             return projected  # (proj_dim,)
 
 
-        proj_dim = 10_000
+        proj_dim = 1_000
         proj_seed = 42  # fixed so same projection is used every call
 
         def compute_task_grad(task_data):
