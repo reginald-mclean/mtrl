@@ -26,6 +26,7 @@ cpu = ["jax>=0.5.0"]
 # https://github.com/jax-ml/jax/issues/27062
 metal = ["jax<=0.5.0", "jax-metal>=0.1.0; sys_platform == 'darwin'"]
 cuda12 = ["jax[cuda12]>=0.5.0"]
+cuda13 = ["jax[cuda13]>=0.7.2"]
 tpu = ["jax[tpu]>=0.5.0"]
 testing = [
     "chex>=0.1.89",
@@ -39,12 +40,10 @@ conflicts = [
     { extra = "cpu" },
     { extra = "metal" },
     { extra = "cuda12" },
+    { extra = "cuda13" },
     { extra = "tpu" },
   ],
 ]
-
-[tool.uv.sources]
-metaworld = { git = "https://github.com/reginald-mclean/Metaworld.git", rev = "release" }
 
 [tool.ruff]
 ignore = ["F722"]
@@ -53,3 +52,7 @@ ignore-init-module-imports = true
 [tool.setuptools.packages.find]
 include = ["mtrl", "mtrl.*"]
 
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"

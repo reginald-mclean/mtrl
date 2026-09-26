@@ -25,7 +25,7 @@ from mtrl.rl.algorithms import (
     get_algorithm_for_config,
 )
 from mtrl.types import CheckpointMetadata
-from mtrl.envs import AtariConfig
+# from mtrl.envs import AtariConfig
 
 @dataclass
 class Experiment:
