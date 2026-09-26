@@ -11,7 +11,7 @@ dependencies = [
     "gymnasium>=1.0.0",
     "jaxtyping>=0.2.34",
     "matplotlib>=3.10.0",
-    "metaworld",
+    "metaworld==3.1.1",
     "numpy>=2.1.2",
     "opencv-python>=4.11.0.86",
     "orbax-checkpoint>=0.7.0",
@@ -26,21 +26,25 @@ cpu = ["jax>=0.5.0"]
 # https://github.com/jax-ml/jax/issues/27062
 metal = ["jax<=0.5.0", "jax-metal>=0.1.0; sys_platform == 'darwin'"]
 cuda12 = ["jax[cuda12]>=0.5.0"]
-cuda13 = ["jax[cuda13]>=0.7.2"]
 tpu = ["jax[tpu]>=0.5.0"]
 testing = [
     "chex>=0.1.89",
     "pytest>=8.3.5",
 ]
 
+[dependency-groups]
+# Installed by default (see default-groups); use `--no-group cuda13` with another backend extra.
+cuda13 = ["jax[cuda13]>=0.7.2"]
+
 [tool.uv]
 prerelease = "allow"
+default-groups = ["cuda13"]
 conflicts = [
   [
     { extra = "cpu" },
     { extra = "metal" },
     { extra = "cuda12" },
-    { extra = "cuda13" },
+    { group = "cuda13" },
     { extra = "tpu" },
   ],
 ]
