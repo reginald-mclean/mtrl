@@ -163,7 +163,8 @@ class MetaworldConfig(EnvConfig):
                         num_goals=self.num_goals,
                         reward_normalization_method=self.reward_normalization_method,
                     )
-                ]
+                ],
+                autoreset_mode=gym.vector.AutoresetMode.SAME_STEP,
             )
         else:
             return gym.make_vec(

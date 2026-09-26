@@ -20,7 +20,7 @@ class Args:
     wandb_entity: str | None = None
     data_dir: Path = Path("./experiment_results")
     resume: bool = False
-
+    task_name: str = "peg-insert-side-v3"
 
 def main() -> None:
     args = tyro.cli(Args)
@@ -33,7 +33,7 @@ def main() -> None:
         data_dir=args.data_dir,
         env=MetaworldConfig(
             env_id="MT1",
-            task_name="peg-insert-side-v3",
+            task_name=args.task_name,
             terminate_on_success=False,
         ),
         algorithm=SACConfig(
