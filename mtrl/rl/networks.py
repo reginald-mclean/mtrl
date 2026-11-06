@@ -159,10 +159,8 @@ class BRCCritic(nn.Module):
 
         x = jnp.concatenate([states, actions, embedding], axis=-1)
         x = get_nn_arch_for_config(self.bro_config)(self.bro_config)(x)
-        if self.q_function_config.use_classification:
-            x = nn.Dense(self.q_function_config.num_atoms)(x)
-        else:
-            x = nn.Dense(1)(x)
+        assert self.q_function_config.num_atoms is not None, "BRCCritic requires num_atoms to be set"
+        x = nn.Dense(self.q_function_config.num_atoms)(x)
 
         return x
 
@@ -174,14 +172,22 @@ class BRCActor(nn.Module):
     task_embed_config: TaskEmbeddingConfig
     action_dim: int
 
-    @nn.compact
-    def __call__(self, x: jax.Array, task_ids: jax.Array):
-        embedding = get_nn_arch_for_config(self.task_embed_config)(config=self.task_embed_config)(task_ids)
+    def setup(self):
+        self.task_embed = get_nn_arch_for_config(self.task_embed_config)(config=self.task_embed_config)
+        self.bro_net = get_nn_arch_for_config(self.bro_config)(self.bro_config)
+        self.policy = ContinuousActionPolicy(config=self.actor_config, action_dim=self.action_dim)
 
+    def forward_with_embedding(self, x: jax.Array, embedding: jax.Array):
+        """Actor forward using a pre-computed task embedding (shared from critic)."""
         x = jnp.concatenate([x, embedding], axis=-1)
-        x = get_nn_arch_for_config(self.bro_config)(self.bro_config)(x)
-        x = ContinuousActionPolicy(config=self.actor_config, action_dim=self.action_dim)(x)
-        return x
+        x = self.bro_net(x)
+        return self.policy(x)
+
+    def __call__(self, x: jax.Array, task_ids: jax.Array):
+        embedding = self.task_embed(task_ids)
+        x = jnp.concatenate([x, embedding], axis=-1)
+        x = self.bro_net(x)
+        return self.policy(x)
 
 
 

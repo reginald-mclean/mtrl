@@ -102,7 +102,7 @@ class OffPolicyAlgorithm(
     def spawn_replay_buffer(
         self, env_config: EnvConfig, config: OffPolicyTrainingConfig, seed: int = 1
     ) -> MultiTaskReplayBuffer:
-        return MultiTaskReplayBuffer(
+        buf = MultiTaskReplayBuffer(
             total_capacity=config.buffer_size,
             num_tasks=self.num_tasks,
             env_obs_space=env_config.observation_space,
@@ -116,6 +116,9 @@ class OffPolicyAlgorithm(
             filter_mode=config.reward_filter_mode,
             returns_normalization=config.returns_normalization,
         )
+        if config.nstep > 1:
+            buf.configure_nstep(config.nstep, self.gamma)
+        return buf
 
     @override
     def train(
@@ -180,7 +183,7 @@ class OffPolicyAlgorithm(
                 )
 
             if type(env_config) is not AtariConfig:
-                replay_buffer.add(obs, buffer_obs, actions, rewards, done)
+                replay_buffer.add(obs, buffer_obs, actions, rewards, done, truncated=truncations)
             else:
                 replay_buffer.add(obs, buffer_obs, actions, rewards, truncations, done)
 
@@ -198,7 +201,7 @@ class OffPolicyAlgorithm(
                     global_episodic_length.append(ep_length)
                     episodes_ended += 1
 
-            if global_step % 500 == 0 and global_episodic_return:
+            if global_step % 1000 == 0 and global_episodic_return:
                 mean_ep_return = np.mean(list(global_episodic_return))
                 print(f"global_step={total_steps}, mean_episodic_return={mean_ep_return:.4f}")
                 if track:
@@ -278,44 +281,11 @@ class OffPolicyAlgorithm(
 
                     # Sample balanced data for metrics/weights (requires equal per-task sizes)
                     metrics_data = replay_buffer.sample(envs.num_envs * 128)
-                    #self, network_metrics = self.get_metrics(
-                    #    config.compute_network_metrics, metrics_data
-                    #)
-                    # print(network_metrics)
-                    self, update_logs = self.compute_weights(metrics_data)
-
+                    self, network_metrics = self.get_metrics(
+                        config.compute_network_metrics, metrics_data
+                    )
                     if track:
-                        wandb.log(update_logs, step=total_steps)
-
-                    #if track:
-                    #    wandb.log(network_metrics, step=total_steps)
-
-                    # Checkpointing
-                    if checkpoint_manager is not None:
-                        if not done.all():
-                            raise NotImplementedError(
-                                "Checkpointing currently doesn't work for the case where evaluation is run before all envs have finished their episodes / are about to be reset."
-                            )
-
-                        checkpoint_manager.save(
-                            total_steps,
-                            args=get_checkpoint_save_args(
-                                self,
-                                envs,
-                                global_step,
-                                episodes_ended,
-                                run_timestamp,
-                                buffer=replay_buffer,
-                            ),
-                            metrics={
-                                k.removeprefix("charts/"): v
-                                for k, v in eval_metrics.items()
-                            },
-                        )
-
-                    # Reset envs again to exit eval mode
-                    if not eval_envs:
-                        obs, _ = envs.reset()
+                        wandb.log(network_metrics, step=total_steps)
 
         mean_ep_return = np.mean(list(global_episodic_return))
         print(f"global_step={total_steps}, mean_episodic_return={mean_ep_return:.4f}")
@@ -443,7 +413,7 @@ class OnPolicyAlgorithm(
                     )
                     episodes_ended += 1
 
-            if global_step % 500 == 0 and global_episodic_return:
+            if global_step % 1000 == 0 and global_episodic_return:
                 print(
                     f"global_step={total_steps}, mean_episodic_return={np.mean(list(global_episodic_return))}"
                 )

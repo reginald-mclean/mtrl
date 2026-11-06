@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from mtrl.config.optim import OptimizerConfig
 
-from .utils import Activation, Initializer
+from .utils import Activation, Initializer, Optimizer
 
 @dataclass(frozen=True, kw_only=True)
 class NeuralNetworkConfig:
@@ -42,6 +42,9 @@ class VanillaNetworkConfig(NeuralNetworkConfig):
 class BroConfig(NeuralNetworkConfig):
     num_blocks: int = 2
     width: int = 4096
+    use_layer_norm: bool = True
+    # optimizer: OptimizerConfig = OptimizerConfig(optimizer=Optimizer.AdamW, weight_decay=1e-4)
+
 
 @dataclass(frozen=True, kw_only=True)
 class ImpalaEncoderConfig(NeuralNetworkConfig):

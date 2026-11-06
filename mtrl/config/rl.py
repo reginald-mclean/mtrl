@@ -48,6 +48,8 @@ class OffPolicyTrainingConfig(TrainingConfig):
     warmstart_steps: int = int(4e3)
     buffer_size: int = int(1e6)
     batch_size: int = 1280
+    nstep: int = 1
+    replay_ratio: int = 1
 
 
 @dataclass(frozen=True)

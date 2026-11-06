@@ -18,9 +18,10 @@ class Args:
     track: bool = False
     wandb_project: str | None = None
     wandb_entity: str | None = None
-    data_dir: Path = Path("./experiment_results")
+    data_dir: Path = Path("./results")
     resume: bool = False
     task_name: str = "peg-insert-side-v3"
+    normalize_returns: bool = False
 
 def main() -> None:
     args = tyro.cli(Args)
@@ -54,7 +55,8 @@ def main() -> None:
             num_critics=2,
         ),
         training_config=OffPolicyTrainingConfig(
-            evaluation_frequency=200,
+            returns_normalization=args.normalize_returns,
+            evaluation_frequency=20,
             total_steps=int(2_000_000),
             buffer_size=int(100_000),
             batch_size=128,

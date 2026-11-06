@@ -6,7 +6,7 @@ import tyro
 
 from mtrl.config.networks import BroQConfig, BroActorConfig, QValueFunctionConfig, TaskEmbeddingConfig, ContinuousActionPolicyConfig
 from mtrl.config.nn import VanillaNetworkConfig, BroConfig
-from mtrl.config.optim import OptimizerConfig
+
 from mtrl.config.rl import OffPolicyTrainingConfig
 from mtrl.envs import HumanoidBenchConfig
 from mtrl.experiment import Experiment
@@ -54,19 +54,18 @@ def main() -> None:
                 actor_config=ContinuousActionPolicyConfig(
                     network_config=VanillaNetworkConfig(
                         width=WIDTH,
-                        depth=1,
-                        optimizer=OptimizerConfig(max_grad_norm=1.0) #  if args.reward_func_version == 'v2' else None),
-                     )
+                        depth=0,
+                    )
                 )
             ),
             critic_config=BroQConfig(
-                bro_config=BroConfig(num_blocks=2, width=1024),
+                bro_config=BroConfig(num_blocks=2, width=WIDTH),
                 task_embed_config=TaskEmbeddingConfig(num_tasks=num_tasks),
                 q_function_config=QValueFunctionConfig(
                     num_atoms=101,
                     network_config=VanillaNetworkConfig(
                         width=WIDTH,
-                        optimizer=OptimizerConfig(max_grad_norm=1.0) #  if args.reward_func_version == 'v2' else None),
+                        depth=0,
                     )
                 )
             ),
@@ -77,7 +76,8 @@ def main() -> None:
             total_steps=int(2_000_000 * num_tasks),
             buffer_size=int(100_000 * num_tasks),
             batch_size=int(128*num_tasks),
-            evaluation_frequency=int(450_000//500),
+            evaluation_frequency=int(900_000//500),
+            replay_ratio=2,
         ),
         checkpoint=False,
         resume=args.resume,

@@ -33,6 +33,7 @@ class ReplayBufferSamples(NamedTuple):
     next_observations: Float[Observation, " batch"]
     dones: Float[np.ndarray, "batch 1"]
     rewards: Float[np.ndarray, "batch 1"]
+    reward_scales: Float[np.ndarray, "batch 1"] | None = None
 
 
 class AtariReplayBufferSamples(NamedTuple):

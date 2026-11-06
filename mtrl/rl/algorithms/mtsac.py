@@ -85,19 +85,35 @@ def _eval_action(
 
 @jax.jit
 def _sample_action_bro(
-    actor: TrainState, observation: Observation, task_ids: jax.Array, key: PRNGKeyArray
+    actor: TrainState, observation: Observation, embedding: jax.Array, key: PRNGKeyArray
 ) -> tuple[Float[Array, "... action_dim"], PRNGKeyArray]:
     key, action_key = jax.random.split(key)
-    dist = actor.apply_fn(actor.params, observation, task_ids)
+    dist = actor.apply_fn(actor.params, observation, embedding, method=BRCActor.forward_with_embedding)
     action = dist.sample(seed=action_key)
     return action, key
 
 
 @jax.jit
 def _eval_action_bro(
-    actor: TrainState, observation: Observation, task_ids: jax.Array
+    actor: TrainState, observation: Observation, embedding: jax.Array
 ) -> Float[Array, "... action_dim"]:
-    return actor.apply_fn(actor.params, observation, task_ids).mode()
+    return actor.apply_fn(actor.params, observation, embedding, method=BRCActor.forward_with_embedding).mode()
+
+
+def _extract_critic_embedding(critic_params: FrozenDict, task_ids: jax.Array) -> jax.Array:
+    """Extract L2-normalised task embedding from critic[0]'s embedding table.
+
+    The Ensemble vmap stacks critic params along axis-0, so critic[0]'s embedding
+    table is at index 0 of the leading dimension. The lookup replicates exactly
+    what TaskEmbedding.__call__ does (nn.Embed lookup + L2 normalisation).
+    """
+    vmap_key = next(iter(critic_params['params']))
+    te_key = next(k for k in critic_params['params'][vmap_key] if 'TaskEmbed' in k)
+    embed_table = critic_params['params'][vmap_key][te_key]['Embed_0']['embedding']
+    # embed_table: (num_critics, num_tasks, embed_dim)
+    raw_emb = embed_table[0][task_ids]          # (batch, embed_dim)
+    norm = jnp.linalg.norm(raw_emb, axis=-1, keepdims=True)
+    return raw_emb / (norm + 1e-8)
 
 
 def extract_task_weights(
@@ -117,8 +133,8 @@ def extract_task_weights(
 class MTSACConfig(AlgorithmConfig):
     actor_config: ContinuousActionPolicyConfig = ContinuousActionPolicyConfig()
     critic_config: QValueFunctionConfig = QValueFunctionConfig()
-    temperature_optimizer_config: OptimizerConfig = OptimizerConfig(max_grad_norm=None)
-    initial_temperature: float = 1.0
+    temperature_optimizer_config: OptimizerConfig = OptimizerConfig(max_grad_norm=None, b1=0.5)
+    initial_temperature: float = 0.1
     num_critics: int = 2
     tau: float = 0.005
     use_task_weights: bool = False
@@ -126,6 +142,7 @@ class MTSACConfig(AlgorithmConfig):
     v_max: float = 10.0
     n_atoms: int = 51
     max_q_value: float | None = None
+    critic_loss_type: str = 'two_hot'
 
 
 class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
@@ -150,6 +167,7 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
     v_max: float = struct.field(pytree_node=False)
     n_atoms: int = struct.field(pytree_node=False)
     max_q_value: float | None = struct.field(pytree_node=False)
+    critic_loss_type: str = struct.field(pytree_node=False)
 
 
     @override
@@ -258,7 +276,7 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
             tx=config.temperature_optimizer_config.spawn(),
         )
 
-        target_entropy = -np.prod(env_config.action_space.shape).item()
+        target_entropy = -np.prod(env_config.action_space.shape).item() / 2
 
         
 
@@ -285,6 +303,7 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
             v_max=config.v_max,
             n_atoms=n_atoms,
             max_q_value=config.max_q_value,
+            critic_loss_type='c51' if isinstance(config.critic_config, BroQConfig) else config.critic_loss_type,
         )
 
     def reset(self, env_mask) -> None:
@@ -304,7 +323,8 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
         if self.actor_network_type == 'vanilla':
             action, key = _sample_action(self.actor, observation, self.key)
         elif self.actor_network_type == 'bro':
-            action, key = _sample_action_bro(self.actor, observation, task_ids, self.key)
+            emb = _extract_critic_embedding(self.critic.params, task_ids)
+            action, key = _sample_action_bro(self.actor, observation, emb, self.key)
         return self.replace(key=key), jax.device_get(action)
 
     @override
@@ -312,7 +332,8 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
         if self.actor_network_type == 'vanilla':
             return jax.device_get(_eval_action(self.actor, observations))
         elif self.actor_network_type == 'bro':
-            return jax.device_get(_eval_action_bro(self.actor, observations, task_ids))
+            emb = _extract_critic_embedding(self.critic.params, task_ids)
+            return jax.device_get(_eval_action_bro(self.actor, observations, emb))
 
     def split_data_by_tasks(
         self,
@@ -374,8 +395,10 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
                 )  # [num_critics, batch, n_atoms]
 
             elif self.actor_network_type == 'bro':
+                _actor_emb = _extract_critic_embedding(self.critic.params, task_ids)
                 next_actions, next_action_log_probs = self.actor.apply_fn(
-                    self.actor.params, data.next_observations, task_ids
+                    self.actor.params, data.next_observations, _actor_emb,
+                    method=BRCActor.forward_with_embedding,
                 ).sample_and_log_prob(seed=critic_loss_key)
 
                 target_logits = self.critic.apply_fn(
@@ -388,13 +411,18 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
             support = jnp.linspace(self.v_min, self.v_max, self.n_atoms)
             delta_z = (self.v_max - self.v_min) / (self.n_atoms - 1)
             target_probs = jax.nn.softmax(target_logits, axis=-1)  # [num_critics, batch, n_atoms]
+            avg_target_probs = jnp.mean(target_probs, axis=0)      # [batch, n_atoms]
 
-            expected_Q = jnp.sum(target_probs * support, axis=-1)  # [num_critics, batch]
-            min_Q_idx = jnp.argmin(expected_Q, axis=0)             # [batch]  -- used by true C51
-            min_Q_next = jnp.min(expected_Q, axis=0)               # [batch]
+            avg_Q_next = jnp.sum(avg_target_probs * support, axis=-1)  # [batch]
 
             next_action_log_probs = next_action_log_probs.reshape(-1)
-            target_value = min_Q_next - alpha_val.reshape(-1) * next_action_log_probs
+            # When rewards are return-normalised, scale alpha by the same factor so
+            # the entropy term stays in the same range as the normalized Q-values.
+            if data.reward_scales is not None:
+                alpha_bellman = alpha_val.reshape(-1) / data.reward_scales.reshape(-1)
+            else:
+                alpha_bellman = alpha_val.reshape(-1)
+            target_value = avg_Q_next - alpha_bellman * next_action_log_probs
             scalar_target = (
                 data.rewards.reshape(-1)
                 + (1 - data.dones.reshape(-1)) * self.gamma * target_value
@@ -420,21 +448,14 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
 
             elif self.critic_loss_type == 'c51':
                 # ---- True C51: distributional Bellman backup ----
-                # Shifts each atom of the *min-Q critic's distribution* by r + gamma*z,
-                # then projects back onto the fixed support. This is the only variant
-                # that actually propagates return-distribution information.
-                min_target_probs = target_probs[
-                    min_Q_idx, jnp.arange(B)
-                ]  # [batch, n_atoms]  pessimistic critic's distribution
-
-                # Shift each atom through the Bellman operator, accounting for entropy
-                # The SAC soft backup shifts atom j by: r + gamma*(z_j - alpha*log_pi)
+                # Projects the *averaged* target distribution (BRC paper approach):
+                # average both critics' softmax distributions before projecting.
                 log_probs_expanded = next_action_log_probs[:, None]           # [batch, 1]
                 tz = jnp.clip(
                     data.rewards.reshape(-1, 1)
                     + (1 - data.dones.reshape(-1, 1))
                     * self.gamma
-                    * (support[None, :] - alpha_val.reshape(-1, 1) * log_probs_expanded),
+                    * (support[None, :] - alpha_bellman.reshape(-1, 1) * log_probs_expanded),
                     self.v_min,
                     self.v_max,
                 )  # [batch, n_atoms]
@@ -443,11 +464,10 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
                 l = jnp.floor(b).astype(jnp.int32)  # [batch, n_atoms]
                 u = jnp.ceil(b).astype(jnp.int32)   # [batch, n_atoms]
 
-                # Scatter each atom's probability mass to its two neighbours
                 batch_idx = jnp.arange(B)[:, None] * jnp.ones((1, self.n_atoms), dtype=jnp.int32)
                 m = jnp.zeros((B, self.n_atoms))
-                m = m.at[batch_idx, l].add(min_target_probs * (u - b))
-                m = m.at[batch_idx, u].add(min_target_probs * (b - l))
+                m = m.at[batch_idx, l].add(avg_target_probs * (u + (l == u) - b))
+                m = m.at[batch_idx, u].add(avg_target_probs * (b - l))
 
             elif self.critic_loss_type == 'hl_gauss':
                 # ---- HL-Gauss: Gaussian-smoothed scalar target ----
@@ -470,9 +490,11 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
             # ------------------------------------------------------------------ #
             # Common: cross-entropy loss and gradient step
             # ------------------------------------------------------------------ #
+            _critic_extra = (task_ids,) if self.actor_network_type == 'bro' else ()
+
             def critic_loss_fn(params: FrozenDict) -> tuple[Float[Array, ""], Float[Array, ""]]:
                 online_logits = self.critic.apply_fn(
-                    params, data.observations, data.actions,
+                    params, data.observations, data.actions, *_critic_extra,
                 )  # [num_critics, batch, n_atoms]
                 log_probs = jax.nn.log_softmax(online_logits, axis=-1)
 
@@ -526,17 +548,20 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
                 self.critic.target_params, data.next_observations, next_actions
             )
         else:
+            task_ids = jnp.argmax(data.observations[..., -self.num_tasks :], axis=1)
             if self.actor_network_type == 'vanilla':
                 next_actions, next_action_log_probs = self.actor.apply_fn(
                     self.actor.params, data.next_observations
                 ).sample_and_log_prob(seed=critic_loss_key)
             elif self.actor_network_type == 'bro':
-                task_ids = jnp.argmax(data.observations[..., -self.num_tasks :], axis=1)
+                _actor_emb = _extract_critic_embedding(self.critic.params, task_ids)
                 next_actions, next_action_log_probs = self.actor.apply_fn(
-                    self.actor.params, data.next_observations, task_ids
+                    self.actor.params, data.next_observations, _actor_emb,
+                    method=BRCActor.forward_with_embedding,
                 ).sample_and_log_prob(seed=critic_loss_key)
+            _critic_extra = (task_ids,) if self.actor_network_type == 'bro' else ()
             q_values = self.critic.apply_fn(
-                self.critic.target_params, data.next_observations, next_actions
+                self.critic.target_params, data.next_observations, next_actions, *_critic_extra,
             )
 
         def critic_loss(
@@ -548,15 +573,21 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
             _task_weights: Float[Array, "#batch 1"] | None = None,
         ) -> tuple[Float[Array, ""], Float[Array, ""]]:
             # next_action_log_probs is (B,) shaped because of the sum(axis=1), while Q values are (B, 1)
+            if _data.reward_scales is not None:
+                _alpha_b = _alpha_val / _data.reward_scales
+            else:
+                _alpha_b = _alpha_val
             min_qf_next_target = jnp.min(
                 _q_values, axis=0
-            ) - _alpha_val * _next_action_log_probs.reshape(-1, 1)
+            ) - _alpha_b * _next_action_log_probs.reshape(-1, 1)
 
             next_q_value = jax.lax.stop_gradient(
                 _data.rewards + (1 - _data.dones) * self.gamma * min_qf_next_target
             )
 
-            q_pred = self.critic.apply_fn(params, _data.observations, _data.actions)
+            _task_ids = jnp.argmax(_data.observations[..., -self.num_tasks:], axis=1)
+            _cextra = (_task_ids,) if self.actor_network_type == 'bro' else ()
+            q_pred = self.critic.apply_fn(params, _data.observations, _data.actions, *_cextra)
 
             if self.max_q_value is not None:
                 # HACK: Clipping Q values to approximate theoretical maximum for Metaworld
@@ -647,29 +678,38 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
                     params, _data.observations
                 ).sample_and_log_prob(seed=actor_loss_key)
             elif self.actor_network_type == 'bro':
+                _emb = _extract_critic_embedding(self.critic.params, task_ids)
                 action_samples, log_probs = self.actor.apply_fn(
-                    params, _data.observations, task_ids
+                    params, _data.observations, _emb,
+                    method=BRCActor.forward_with_embedding,
                 ).sample_and_log_prob(seed=actor_loss_key)
-
 
             log_probs = log_probs.reshape(-1, 1)
 
+            _actor_cextra = (task_ids,) if self.actor_network_type == 'bro' else ()
             if self.critic_network_type == 'c51':
                 logits = self.critic.apply_fn(
-                    self.critic.params, _data.observations, action_samples, # task_ids
+                    self.critic.params, _data.observations, action_samples, *_actor_cextra,
                 )
                 support = jnp.linspace(self.v_min, self.v_max, self.n_atoms)
-                q_values = jnp.sum(jax.nn.softmax(logits, axis=-1) * support, axis=-1)  # [num_critics, batch]
-                min_qf_values = jnp.min(q_values, axis=0).reshape(-1, 1)
+                q_probs = jnp.mean(jax.nn.softmax(logits, axis=-1), axis=0)  # [batch, n_atoms] - average over critics
+                min_qf_values = jnp.sum(q_probs * support, axis=-1).reshape(-1, 1)
             else:
                 q_values = self.critic.apply_fn(
-                    self.critic.params, _data.observations, action_samples
+                    self.critic.params, _data.observations, action_samples, *_actor_cextra,
                 )
                 min_qf_values = jnp.min(q_values, axis=0)
-            if _task_weights is not None:
-                loss = (task_weights * (_alpha_val * log_probs - min_qf_values)).mean()
+
+            # Scale alpha to match normalised Q-value range
+            if _data.reward_scales is not None:
+                _alpha_scaled = _alpha_val / _data.reward_scales
             else:
-                loss = (_alpha_val * log_probs - min_qf_values).mean()
+                _alpha_scaled = _alpha_val
+
+            if _task_weights is not None:
+                loss = (task_weights * (_alpha_scaled * log_probs - min_qf_values)).mean()
+            else:
+                loss = (_alpha_scaled * log_probs - min_qf_values).mean()
 
             if _explore:
                 exp_loss = jnp.mean(jnp.square(_data.actions - action_samples))
@@ -906,23 +946,31 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
                 params, _data, _alpha_val, task_ids, _task_weights=None
             ):
                 if self.actor_network_type == 'bro':
+                    _tids = jnp.argmax(task_ids, axis=1)
+                    _emb = _extract_critic_embedding(self.critic.params, _tids)
                     next_actions, next_action_log_probs = self.actor.apply_fn(
-                        self.actor.params, _data.next_observations, jnp.argmax(task_ids, axis=1)
+                        self.actor.params, _data.next_observations, _emb,
+                        method=BRCActor.forward_with_embedding,
                     ).sample_and_log_prob(seed=critic_loss_key)
                 else:
                     next_actions, next_action_log_probs = self.actor.apply_fn(
                         self.actor.params, _data.next_observations
                     ).sample_and_log_prob(seed=critic_loss_key)
 
+                _sc_extra = (jnp.argmax(task_ids, axis=1),) if self.actor_network_type == 'bro' else ()
                 target_logits = self.critic.apply_fn(
-                    self.critic.target_params, _data.next_observations, next_actions,
+                    self.critic.target_params, _data.next_observations, next_actions, *_sc_extra,
                 )
                 target_probs = jax.nn.softmax(target_logits, axis=-1)
-                expected_Q = jnp.sum(target_probs * support, axis=-1)
-                min_Q_next = jnp.min(expected_Q, axis=0)
+                avg_target_probs = jnp.mean(target_probs, axis=0)      # [batch, n_atoms]
+                avg_Q_next = jnp.sum(avg_target_probs * support, axis=-1)  # [batch]
 
                 next_lp = next_action_log_probs.reshape(-1)
-                target_value = min_Q_next - _alpha_val.reshape(-1) * next_lp
+                if _data.reward_scales is not None:
+                    _alpha_bellman = _alpha_val.reshape(-1) / _data.reward_scales.reshape(-1)
+                else:
+                    _alpha_bellman = _alpha_val.reshape(-1)
+                target_value = avg_Q_next - _alpha_bellman * next_lp
                 scalar_target = _data.rewards.reshape(-1) + (1 - _data.dones.reshape(-1)) * self.gamma * target_value
 
                 per_task_batch = _data.observations.shape[0]
@@ -942,18 +990,13 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
                     m = m.at[jnp.arange(per_task_batch), u].add(b - l)
 
                 elif self.critic_loss_type == 'c51':
-                    # ---- True C51: distributional Bellman backup ----
-                    min_Q_idx = jnp.argmin(expected_Q, axis=0)  # [batch]
-                    min_target_probs = target_probs[
-                        min_Q_idx, jnp.arange(per_task_batch)
-                    ]  # [batch, n_atoms]
-
+                    # ---- True C51: distributional Bellman backup (average, per BRC paper) ----
                     log_probs_expanded = next_lp[:, None]  # [batch, 1]
                     tz = jnp.clip(
                         _data.rewards.reshape(-1, 1)
                         + (1 - _data.dones.reshape(-1, 1))
                         * self.gamma
-                        * (support[None, :] - _alpha_val.reshape(-1, 1) * log_probs_expanded),
+                        * (support[None, :] - _alpha_bellman.reshape(-1, 1) * log_probs_expanded),
                         self.v_min,
                         self.v_max,
                     )  # [batch, n_atoms]
@@ -964,8 +1007,8 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
 
                     batch_idx = jnp.arange(per_task_batch)[:, None] * jnp.ones((1, self.n_atoms), dtype=jnp.int32)
                     m = jnp.zeros((per_task_batch, self.n_atoms))
-                    m = m.at[batch_idx, l].add(min_target_probs * (u - b))
-                    m = m.at[batch_idx, u].add(min_target_probs * (b - l))
+                    m = m.at[batch_idx, l].add(avg_target_probs * (u + (l == u) - b))
+                    m = m.at[batch_idx, u].add(avg_target_probs * (b - l))
 
                 elif self.critic_loss_type == 'hl_gauss':
                     # ---- HL-Gauss: Gaussian-smoothed scalar target ----
@@ -982,7 +1025,7 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
                 m = jax.lax.stop_gradient(m)
 
                 online_logits = self.critic.apply_fn(
-                    params, _data.observations, _data.actions,
+                    params, _data.observations, _data.actions, *_sc_extra,
                 )
                 log_probs = jax.nn.log_softmax(online_logits, axis=-1)
                 if _task_weights is not None:
@@ -1008,20 +1051,32 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
                     seed=critic_loss_key
                 )
             )(split_data.observations)
-            q_values = jax.vmap(self.critic.apply_fn, in_axes=(None, 0, 0))(
-                self.critic.target_params, split_data.next_observations, next_actions
-            )
+            if self.actor_network_type == 'bro':
+                _split_tids = jnp.argmax(split_data.observations[..., -self.num_tasks:], axis=2)
+                q_values = jax.vmap(self.critic.apply_fn, in_axes=(None, 0, 0, 0))(
+                    self.critic.target_params, split_data.next_observations, next_actions, _split_tids
+                )
+            else:
+                q_values = jax.vmap(self.critic.apply_fn, in_axes=(None, 0, 0))(
+                    self.critic.target_params, split_data.next_observations, next_actions
+                )
 
             def critic_loss(
                 params, _data, _q_values, _alpha_val, _next_action_log_probs, _task_weights=None
             ):
+                if _data.reward_scales is not None:
+                    _alpha_b = _alpha_val / _data.reward_scales
+                else:
+                    _alpha_b = _alpha_val
                 min_qf_next_target = jnp.min(
                     _q_values, axis=0
-                ) - _alpha_val * _next_action_log_probs.reshape(-1, 1)
+                ) - _alpha_b * _next_action_log_probs.reshape(-1, 1)
                 next_q_value = jax.lax.stop_gradient(
                     _data.rewards + (1 - _data.dones) * self.gamma * min_qf_next_target
                 )
-                q_pred = self.critic.apply_fn(params, _data.observations, _data.actions)
+                _task_ids2 = jnp.argmax(_data.observations[..., -self.num_tasks:], axis=1)
+                _cextra2 = (_task_ids2,) if self.actor_network_type == 'bro' else ()
+                q_pred = self.critic.apply_fn(params, _data.observations, _data.actions, *_cextra2)
                 if self.clip:
                     next_q_value = jnp.clip(next_q_value, -5000, 5000)
                     q_pred = jnp.clip(q_pred, -5000, 5000)
@@ -1063,20 +1118,34 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
                 action_samples, log_probs = self.actor.apply_fn(
                     params, _data.observations
                 ).sample_and_log_prob(seed=actor_loss_key)
+                _al_extra = ()
             elif self.actor_network_type == 'bro':
+                _tids = jnp.argmax(task_ids, axis=1)
+                _emb = _extract_critic_embedding(self.critic.params, _tids)
                 action_samples, log_probs = self.actor.apply_fn(
-                    params, _data.observations, task_ids
+                    params, _data.observations, _emb,
+                    method=BRCActor.forward_with_embedding,
                 ).sample_and_log_prob(seed=actor_loss_key)
+                _al_extra = (_tids,)
 
             log_probs = log_probs.reshape(-1, 1)
             q_values = self.critic.apply_fn(
-                self.critic.params, _data.observations, action_samples
+                self.critic.params, _data.observations, action_samples, *_al_extra,
             )
-            min_qf_values = jnp.min(q_values, axis=0)
-            if _task_weights is not None:
-                loss = (_task_weights * (_alpha_val * log_probs - min_qf_values)).mean()
+            if self.critic_network_type == 'c51':
+                support = jnp.linspace(self.v_min, self.v_max, self.n_atoms)
+                q_probs = jnp.mean(jax.nn.softmax(q_values, axis=-1), axis=0)  # [batch, n_atoms]
+                min_qf_values = jnp.sum(q_probs * support, axis=-1).reshape(-1, 1)
             else:
-                loss = (_alpha_val * log_probs - min_qf_values).mean()
+                min_qf_values = jnp.min(q_values, axis=0)
+            if _data.reward_scales is not None:
+                _alpha_scaled = _alpha_val / _data.reward_scales
+            else:
+                _alpha_scaled = _alpha_val
+            if _task_weights is not None:
+                loss = (_task_weights * (_alpha_scaled * log_probs - min_qf_values)).mean()
+            else:
+                loss = (_alpha_scaled * log_probs - min_qf_values).mean()
             return loss, log_probs
 
         (_, _), actor_grads = jax.vmap(
@@ -1274,22 +1343,32 @@ class MTSAC(OffPolicyAlgorithm[MTSACConfig]):
         actions_dist: distrax.Distribution
         batch_size = data.observations.shape[0]
 
-        actions_dist, actor_state = self.actor.apply_fn(
-            self.actor.params, data.observations, task_ids, mutable="intermediates"
-        )
+        if self.actor_network_type == 'bro':
+            _actor_emb = _extract_critic_embedding(self.critic.params, task_ids)
+            actions_dist, actor_state = self.actor.apply_fn(
+                self.actor.params, data.observations, _actor_emb,
+                mutable="intermediates",
+                method=BRCActor.forward_with_embedding,
+            )
+        else:
+            actions_dist, actor_state = self.actor.apply_fn(
+                self.actor.params, data.observations, mutable="intermediates"
+            )
         actions = actions_dist.sample(seed=critic_activations_key)
 
+        _m_extra = (task_ids,) if self.actor_network_type == 'bro' else ()
         _, critic_state = self.critic.apply_fn(
-            self.critic.params, data.observations, actions, task_ids, mutable="intermediates"
+            self.critic.params, data.observations, actions, *_m_extra, mutable="intermediates"
         )
 
         actor_intermediates = jax.tree.map(
             lambda x: x.reshape(batch_size, -1), actor_state["intermediates"]
         )
 
+
         critic_intermediates = jax.tree.map(
             lambda x: x.reshape(self.num_critics, batch_size, -1),
-            critic_state["intermediates"]["VmapBRCCritic_0"],
+            next(iter(critic_state["intermediates"].values())),
         )
 
         self = self.replace(key=key)

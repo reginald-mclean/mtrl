@@ -10,7 +10,7 @@ class ContinuousActionPolicyConfig:
     squash_tanh: bool = True
     """Whether or not to squash the outputs with tanh."""
 
-    log_std_min: float = -20.0
+    log_std_min: float = -10.0
     """The minimum possible log standard deviation for each action distribution."""
 
     log_std_max: float = 2.0

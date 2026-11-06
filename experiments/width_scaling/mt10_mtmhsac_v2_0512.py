@@ -1,3 +1,7 @@
+import os
+
+os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'
+
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,14 +32,15 @@ def main() -> None:
     WIDTH = 512
 
     experiment = Experiment(
-        exp_name=f"mt10_{WIDTH}_may_11_metrics",
+        exp_name=f"mt10_{WIDTH}_may_11_metrics_100_goals",
         seed=args.seed,
         data_dir=args.data_dir,
         env=MetaworldConfig(
-            num_eval_episodes=10,
+            num_eval_episodes=50,
             env_id="MT10",
             terminate_on_success=False,
             reward_func_version=args.reward_func_version,
+            num_goals=100,
         ),
         algorithm=MTSACConfig(
             num_tasks=10,

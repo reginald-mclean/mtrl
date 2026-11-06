@@ -11,9 +11,12 @@ from .utils import name_prefix
 
 
 class BroBlock(nn.Module):
-    initializer: Callable = nn.initializers.xavier_uniform()
+    initializer: Callable = nn.initializers.orthogonal(jnp.sqrt(2))
     output_size: int = 256
     block_num: int = 0
+    use_layer_norm: bool = True
+
+
 
     @nn.compact
     def __call__(self, x):
@@ -24,7 +27,8 @@ class BroBlock(nn.Module):
             bias_init=nn.initializers.zeros,
             use_bias=True,
         )(x)
-        x = nn.LayerNorm()(x)
+        if self.use_layer_norm:
+            x = nn.LayerNorm()(x)
         x = nn.relu(x)
         self.sow("intermediates", f"bro_block_{self.block_num}_dense_ln_relu", x)
         x = nn.Dense(self.output_size,
@@ -33,7 +37,8 @@ class BroBlock(nn.Module):
             bias_init=nn.initializers.zeros,
             use_bias=True,
         )(x)
-        x = nn.LayerNorm()(x)
+        if self.use_layer_norm:
+            x = nn.LayerNorm()(x)
         x = x + skip
         self.sow("intermediates", f"bro_block_{self.block_num}_dense_ln_skip", x)
         return x
@@ -43,13 +48,15 @@ class BroNet(nn.Module):
     config: BroConfig
 
     def setup(self):
-        self.blocks = [BroBlock(output_size=self.config.width, block_num=x) for x in range(self.config.num_blocks)]
-        self.dense = nn.Dense(self.config.width, kernel_init=nn.initializers.xavier_uniform(), bias_init=nn.initializers.zeros)
-        self.layer_norm = nn.LayerNorm()
+        self.blocks = [BroBlock(output_size=self.config.width, block_num=x, use_layer_norm=self.config.use_layer_norm) for x in range(self.config.num_blocks)]
+        self.dense = nn.Dense(self.config.width, kernel_init=nn.initializers.orthogonal(jnp.sqrt(2)), bias_init=nn.initializers.zeros)
+        if self.config.use_layer_norm:
+            self.layer_norm = nn.LayerNorm()
 
     def __call__(self, x):
         x = self.dense(x)
-        x = self.layer_norm(x)
+        if self.config.use_layer_norm:
+            x = self.layer_norm(x)
         x = nn.relu(x)
 
         self.sow("intermediates", f"bro_block_input_dense_ln_relu", x)

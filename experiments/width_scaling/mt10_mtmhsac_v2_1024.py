@@ -20,20 +20,21 @@ class Args:
     wandb_entity: str | None = None
     data_dir: Path = Path("./results")
     resume: bool = False
-
+    num_goals: int = 50
 
 def main() -> None:
     args = tyro.cli(Args)
 
-    width=1024
+    width = 1024
 
     experiment = Experiment(
-        exp_name=f"mt10_{WIDTH}_may_11_metrics",
+        exp_name=f"mt10_{width}_may_11_metrics_{args.num_goals}_goals",
         seed=args.seed,
         data_dir=args.data_dir,
         env=MetaworldConfig(
             env_id="MT10",
             terminate_on_success=False,
+            num_goals=args.num_goals,
         ),
         algorithm=MTSACConfig(
             clip=True,

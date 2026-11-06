@@ -18,6 +18,7 @@ class OptimizerConfig:
     max_grad_norm: float | None = None
     eps: float | None = None
     weight_decay: float | None = None
+    b1: float | None = None
 
     @property
     def requires_split_task_losses(self) -> bool:
@@ -28,8 +29,9 @@ class OptimizerConfig:
         optim_kwargs = {}
         if self.eps is not None:
             optim_kwargs["eps"] = self.eps
-        elif self.optimizer == Optimizer.Adam:
-            optim_kwargs["eps"] = 1e-5
+
+        if self.b1 is not None:
+            optim_kwargs["b1"] = self.b1
 
         if self.weight_decay is not None and self.optimizer == Optimizer.AdamW:
             optim_kwargs["weight_decay"] = self.weight_decay

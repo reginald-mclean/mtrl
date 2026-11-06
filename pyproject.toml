@@ -19,6 +19,8 @@ dependencies = [
     "wandb>=0.18.5",
     "gymnasium[atari]>=0.29",
     "ale-py>=0.8",
+    "shimmy[dm-control]>=2.0.1",
+    "dm-control>=1.0.28",
 ]
 
 [project.optional-dependencies]

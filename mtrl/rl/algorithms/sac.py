@@ -122,6 +122,7 @@ class SAC(OffPolicyAlgorithm[SACConfig]):
             env_obs_space=env_config.observation_space,
             env_action_space=env_config.action_space,
             seed=seed,
+            returns_normalization=config.returns_normalization,
         )
 
     @override

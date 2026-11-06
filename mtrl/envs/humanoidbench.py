@@ -44,10 +44,10 @@ class HumanoidBenchConfig(EnvConfig):
     @override
     def spawn_eval(self, seed: int = 1) -> gym.vector.VectorEnv:
         names = ['walk', 'stand', 'run', 'stair', 'crawl', 'pole', 'slide', 'hurdle', 'maze']
-        env_fns = [lambda : gym.wrappers.RecordEpisodeStatistics(
+        env_fns = [lambda idx=idx, name=name: gym.wrappers.RecordEpisodeStatistics(
                 OneHotWrapper(
-                    gym.make(f'h1-{name}-v0'), 
-                    idx, 
+                    gym.make(f'h1-{name}-v0'),
+                    idx,
                     len(names),
                 )
             ) for idx, name in enumerate(names)]
@@ -56,10 +56,10 @@ class HumanoidBenchConfig(EnvConfig):
     @override
     def spawn(self, seed: int = 1) -> gym.vector.VectorEnv:
         names = ['walk', 'stand', 'run', 'stair', 'crawl', 'pole', 'slide', 'hurdle', 'maze']
-        env_fns = [lambda : gym.wrappers.RecordEpisodeStatistics(
+        env_fns = [lambda idx=idx, name=name: gym.wrappers.RecordEpisodeStatistics(
                 OneHotWrapper(
-                    gym.make(f'h1-{name}-v0'), 
-                    idx, 
+                    gym.make(f'h1-{name}-v0'),
+                    idx,
                     len(names),
                 )
             ) for idx, name in enumerate(names)]
